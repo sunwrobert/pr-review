@@ -74,6 +74,14 @@
             </div>
           </header>
           <div id="status-bar" class="status-bar h-scroll" data-tauri-drag-region></div>
+          <div id="find-bar" class="find-bar" hidden role="search">
+            <i data-icon="search"></i>
+            <input id="find-input" placeholder="Find in this PR" spellcheck="false" autocomplete="off" />
+            <span id="find-count" class="find-count"></span>
+            <button type="button" id="find-prev" class="icon-button" title="Previous match  ⇧↵"><i data-icon="chevronLeft"></i></button>
+            <button type="button" id="find-next" class="icon-button" title="Next match  ↵"><i data-icon="chevronRight"></i></button>
+            <button type="button" id="find-close" class="icon-button" title="Close  esc"><i data-icon="x"></i></button>
+          </div>
           <div id="pr-body-split">
             <div id="desc-pane"></div>
             <div class="resizer" data-resize="description" title="Drag to resize · double-click to reset"></div>

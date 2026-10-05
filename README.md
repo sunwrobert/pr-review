@@ -111,7 +111,7 @@ Vim motions work the same in every pane; the modifier picks the pane.
 | Act | `⇧X` copy an agent prompt to fix every PR with conflicts or failing checks (or just the selected ones) · `O` open on GitHub (in Chrome) · `A` approve · `⌘↵` merge (all selected when several are checked) · `⇧A` bulk approve · `⌘↵` bulk merge |
 | Layout | `T` theme picker · `⌘B` PR list · `1` review · `2` diff focus · `3` read description · `⌘.` focus |
 | Lightbox | `I` open first media · `H`/`L` or `J`/`K` or `←`/`→` cycle · `gg`/`G` first/last · `⌃D`/`⌃U` skip half · `Z` zoom · `O` open · `Q`/`Esc` close |
-| General | `/` filter · `?` shortcuts · `R` refresh |
+| General | `/` filter PRs · `⌘F` find in this PR (`↵`/`⇧↵` next/prev) · `?` shortcuts · `R` refresh |
 
 ## Credits
 

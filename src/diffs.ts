@@ -149,6 +149,16 @@ export class DiffView {
     this.view.scrollTo({ type: 'position', position: this.root.scrollHeight, behavior: 'instant' });
   }
 
+  scrollToLine(id: string, lineNumber: number, side: 'additions' | 'deletions'): void {
+    if (this.collapsed.has(id)) this.toggle(id, false);
+    this.view.scrollTo({ type: 'line', id, lineNumber, side, align: 'center', behavior: prefersReducedMotion() ? 'instant' : 'smooth' });
+    this.view.setSelectedLines({ id, range: { start: lineNumber, end: lineNumber, side, endSide: side } });
+  }
+
+  clearLineMark(): void {
+    this.view.setSelectedLines(null);
+  }
+
   scrollToFile(id: string): void {
     this.view.scrollTo({ type: 'item', id, align: 'start', behavior: prefersReducedMotion() ? 'instant' : 'smooth' });
   }

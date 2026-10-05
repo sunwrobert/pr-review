@@ -2,6 +2,7 @@ import { hydrateIcons, icon } from './icons';
 import { attachScrollFade } from './scroll-fade';
 import { startAutoUpdate } from './updater';
 import { StableOrder } from './stable-order';
+import { findInDiff, findInDom, type FindHit } from './find-in-pr';
 import { applyPastedOrder, parsePastedOrder, type PastedOrder } from './pasted-order';
 import { watchKbdGlyphs } from './kbd-glyphs';
 import { animateDialogCancel, flash, glideScrollBy, glideScrollTo, setVisibleWithMotion } from './motion';
@@ -1050,6 +1051,7 @@ function resetScrollForNewPull(pull: PullRequest): void {
 
 async function renderSelection(pull: PullRequest): Promise<void> {
   const token = ++renderToken;
+  if (!element('find-bar').hidden) closeFind();
   resetScrollForNewPull(pull);
   dom.empty.hidden = true;
   dom.pr.hidden = false;
@@ -1439,6 +1441,112 @@ function patchHtml(target: Element, html: string): void {
     const existing = current[index];
     if (existing != null && existing.outerHTML !== node.outerHTML) existing.replaceWith(node);
   });
+}
+
+const FIND_HIGHLIGHT = 'pr-find';
+const FIND_CURRENT = 'pr-find-current';
+let findHits: FindHit[] = [];
+let findIndex = -1;
+let findTimer = 0;
+
+function findBar(): { bar: HTMLElement; input: HTMLInputElement; count: HTMLElement } {
+  return { bar: element('find-bar'), input: element<HTMLInputElement>('find-input'), count: element('find-count') };
+}
+
+function openFind(): void {
+  const { bar, input } = findBar();
+  bar.hidden = false;
+  const selection = window.getSelection()?.toString().trim() ?? '';
+  if (selection !== '' && selection.length < 120 && !selection.includes('\n')) input.value = selection;
+  input.focus();
+  input.select();
+  runFind();
+}
+
+function closeFind(): void {
+  const { bar } = findBar();
+  bar.hidden = true;
+  clearFindHighlights();
+  findHits = [];
+  findIndex = -1;
+}
+
+function clearFindHighlights(): void {
+  CSS.highlights?.delete(FIND_HIGHLIGHT);
+  CSS.highlights?.delete(FIND_CURRENT);
+  diffView.clearLineMark();
+}
+
+function runFind(): void {
+  const { input, count } = findBar();
+  const query = input.value.trim();
+  clearFindHighlights();
+  if (query.length === 0) {
+    findHits = [];
+    findIndex = -1;
+    count.textContent = '';
+    return;
+  }
+  const textHits = findInDom(dom.descPane, query);
+  findHits = [...textHits, ...findInDiff(currentFiles, query)];
+  const ranges = textHits.flatMap((hit) => (hit.kind === 'text' ? [hit.range] : []));
+  if (ranges.length > 0 && typeof Highlight !== 'undefined') CSS.highlights.set(FIND_HIGHLIGHT, new Highlight(...ranges));
+  findIndex = findHits.length === 0 ? -1 : 0;
+  showFindHit();
+}
+
+function stepFind(delta: number): void {
+  if (findHits.length === 0) return;
+  findIndex = (findIndex + delta + findHits.length) % findHits.length;
+  showFindHit();
+}
+
+function showFindHit(): void {
+  const { count } = findBar();
+  CSS.highlights?.delete(FIND_CURRENT);
+  if (findIndex < 0) {
+    count.textContent = findBar().input.value.trim() === '' ? '' : 'No matches';
+    count.classList.toggle('none', findBar().input.value.trim() !== '');
+    return;
+  }
+  count.classList.remove('none');
+  const hit = findHits[findIndex];
+  if (hit == null) return;
+  count.textContent = `${findIndex + 1} of ${findHits.length}${hit.kind === 'diff' ? ` · ${hit.fileName.split('/').pop()}:${hit.lineNumber}` : ''}`;
+  if (hit.kind === 'text') {
+    diffView.clearLineMark();
+    if (typeof Highlight !== 'undefined') CSS.highlights.set(FIND_CURRENT, new Highlight(hit.range));
+    const rect = hit.range.getBoundingClientRect();
+    const pane = dom.descPane.getBoundingClientRect();
+    if (rect.top < pane.top + 40 || rect.bottom > pane.bottom - 40) glideScrollTo(dom.descPane, dom.descPane.scrollTop + rect.top - pane.top - pane.height / 3);
+    return;
+  }
+  diffView.scrollToLine(hit.fileId, hit.lineNumber, hit.side);
+}
+
+function wireFindBar(): void {
+  const { input } = findBar();
+  input.addEventListener('input', () => {
+    window.clearTimeout(findTimer);
+    findTimer = window.setTimeout(runFind, 60);
+  });
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      event.stopPropagation();
+      stepFind(event.shiftKey ? -1 : 1);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeFind();
+    } else if (event.key === 'g' && event.metaKey) {
+      event.preventDefault();
+      stepFind(event.shiftKey ? -1 : 1);
+    }
+  });
+  element('find-next').addEventListener('click', () => stepFind(1));
+  element('find-prev').addEventListener('click', () => stepFind(-1));
+  element('find-close').addEventListener('click', closeFind);
 }
 
 function setPastedOrder(order: PastedOrder | null): void {
@@ -2155,7 +2263,8 @@ const DIFF_SCROLL_COMMANDS: Command[] = [
 const COMMANDS: Command[] = [
   { id: 'update', section: 'General', title: 'Check for updates / restart into update', aliases: 'upgrade version release', keys: ['⌘⇧u'], run: () => (restartIntoUpdate != null ? restartIntoUpdate() : (toast('Checking for updates…'), checkForUpdates())) },
   { id: 'help', section: 'General', title: 'Keyboard shortcuts', keys: ['?', '⌘/'], run: openHelp },
-  { id: 'filter', section: 'General', title: 'Filter pull requests', keys: ['/', '⌘f'], run: () => { dom.filter.focus(); dom.filter.select(); const box = dom.filter.closest<HTMLElement>('.search'); if (box != null) flash(box); } },
+  { id: 'find', allowWhileTyping: true, section: 'General', title: 'Find in this PR (description, conversation and diff)', aliases: 'search text body diff code', keys: ['⌘f'], run: openFind, isEnabled: hasPull },
+  { id: 'filter', section: 'General', title: 'Filter pull requests', keys: ['/'], run: () => { dom.filter.focus(); dom.filter.select(); const box = dom.filter.closest<HTMLElement>('.search'); if (box != null) flash(box); } },
   { id: 'refresh', allowWhileTyping: true, section: 'General', title: 'Refresh', keys: ['r', '⌘r'], run: manualRefresh },
 
   { id: 'smart-all', section: 'Filter', title: 'Show all', aliases: 'clear filter', keys: ['⌥0'], run: () => setSmartFilter('all') },
@@ -2330,6 +2439,7 @@ element('open-help').addEventListener('click', openHelp);
 element('open-github').addEventListener('click', openSelectedOnGitHub);
 element('refresh-button').addEventListener('click', manualRefresh);
 element('open-triage').addEventListener('click', openTriage);
+wireFindBar();
 element('pasted-order').addEventListener('click', (event) => {
   if ((event.target as HTMLElement).closest('.pasted-clear') != null) {
     setPastedOrder(null);
