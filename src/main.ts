@@ -2,6 +2,7 @@ import { hydrateIcons, icon } from './icons';
 import { attachScrollFade } from './scroll-fade';
 import { startAutoUpdate } from './updater';
 import { StableOrder } from './stable-order';
+import { forgetThreads, loadThreads, replyToThread, setThreadResolved, type ReviewThread } from './threads';
 import { findInDiff, findInDom, type FindHit } from './find-in-pr';
 import { applyPastedOrder, parsePastedOrder, type PastedOrder } from './pasted-order';
 import { watchKbdGlyphs } from './kbd-glyphs';
@@ -100,7 +101,7 @@ const state: State = {
   kind: 'mine',
   pulls: [],
   filter: '',
-  smartFilter: ((['all', 'ready', 'attention'] as const).find((filter) => filter === localStorage.getItem('smartFilter')) ?? 'all') as SmartFilter,
+  smartFilter: ((['all', 'ready', 'attention', 'threads'] as const).find((filter) => filter === localStorage.getItem('smartFilter')) ?? 'all') as SmartFilter,
   sortOrder: (localStorage.getItem('sortOrder') as SortOrder | null) ?? 'smart',
   checkedIds: new Set<string>(),
   selectedId: null,
@@ -351,6 +352,7 @@ function renderSmartCounts(): void {
     small: state.pulls.filter(isSmall).length,
     recent: state.pulls.filter((pull) => isRecent(pull, now)).length,
     attention: state.pulls.filter((pull) => isMergeStateSettled(pull) && needsAttention(pull)).length,
+    threads: state.pulls.filter((pull) => (pull.openThreads ?? 0) > 0).length,
     tested: state.pulls.filter(isTested).length,
   };
   dom.filterBar.querySelectorAll<HTMLElement>('[data-smart-count]').forEach((badge) => (badge.textContent = String(counts[badge.dataset.smartCount as SmartFilter])));
@@ -568,7 +570,7 @@ function rowHtml(pull: PullRequest, primaryRepo: string | undefined, needle: str
         ${statusIcon(pull)}
         <span class="id" title="${escapeHtml(pull.repository.nameWithOwner)}">${repoTag(pull, primaryRepo)}#${pull.number}</span>
         <span class="t">${escapeHtml(pull.title)}</span>
-        <span class="right">${pull.queueEntry != null ? `<span class="queue-pill" title="${escapeHtml(queueLabel(pull))}">Queued</span>` : ''}${readinessDot(pull)}${checksIcon(pull)}<span class="delta"><i class="add">+${pull.additions}</i> <i class="del">−${pull.deletions}</i></span><span class="age">${relativeTime(pull.updatedAt)}</span>${avatar(pull)}</span>
+        <span class="right">${(pull.openThreads ?? 0) > 0 ? `<span class="thread-pill" title="${pull.openThreads} unresolved thread${pull.openThreads === 1 ? '' : 's'}  ⇧C">${icon('comment')}${pull.openThreads}</span>` : ''}${pull.queueEntry != null ? `<span class="queue-pill" title="${escapeHtml(queueLabel(pull))}">Queued</span>` : ''}${readinessDot(pull)}${checksIcon(pull)}<span class="delta"><i class="add">+${pull.additions}</i> <i class="del">−${pull.deletions}</i></span><span class="age">${relativeTime(pull.updatedAt)}</span>${avatar(pull)}</span>
       </li>`;
 }
 
@@ -581,7 +583,7 @@ function renderListEmpty(count: number, needle: string): void {
   const kind = count > 0 || isBooting ? '' : isSearching ? 'searching' : isAwaiting ? 'checking' : state.pulls.length === 0 ? 'empty' : needle !== '' ? 'no-results' : 'filtered';
   if (box.dataset.kind === kind) return;
   box.dataset.kind = kind;
-  const filterLabel = state.smartFilter === 'ready' ? 'Ready' : state.smartFilter === 'attention' ? 'Unready' : state.smartFilter;
+  const filterLabel = state.smartFilter === 'ready' ? 'Ready' : state.smartFilter === 'attention' ? 'Unready' : state.smartFilter === 'threads' ? 'waiting on review threads' : state.smartFilter;
   const views: Record<string, string> = {
     searching: `${icon('search', 'empty-ico')}<b>Searching…</b><span>Looking for “${escapeHtml(needle)}”</span><div class="empty-skel"><span></span><span></span><span></span></div>`,
     checking: `<div class="empty-overlay"><b>Checking merge status…</b><span>Asking GitHub which PRs are ready to merge</span></div>`,
@@ -744,6 +746,182 @@ function conversationItemHtml(item: ConversationItem): string {
   </article>`;
 }
 
+let showResolvedThreads = false;
+let currentThreads: ReviewThread[] = [];
+
+function threadHtml(thread: ReviewThread): string {
+  const location = `${thread.path}${thread.line != null ? `:${thread.line}` : ''}`;
+  const [first, ...rest] = thread.comments;
+  const commentHtml = (comment: ReviewThread['comments'][number], isReply: boolean): string => `<div class="thread-comment${isReply ? ' is-reply' : ''}">
+      <header>${comment.avatarUrl == null ? '<span class="avatar"></span>' : `<img class="avatar" src="${escapeHtml(comment.avatarUrl)}&s=40" alt="" loading="lazy" />`}<b>${escapeHtml(comment.author)}</b>${comment.isBot ? '<span class="bot-tag">bot</span>' : ''}<a class="comment-time" href="${escapeHtml(comment.url)}" title="Open on GitHub">${relativeTime(comment.at)} ago</a></header>
+      <div class="markdown comment-body">${sanitizeHtml(comment.html)}</div>
+    </div>`;
+  const resolveLabel = thread.isResolved ? 'Unresolve' : 'Resolve';
+  return `<article class="thread${thread.isResolved ? ' is-resolved' : ''}${thread.isOutdated ? ' is-outdated' : ''}" data-thread="${escapeHtml(thread.id)}">
+    <header class="thread-head">
+      <button type="button" class="thread-loc" data-thread-jump="${escapeHtml(thread.id)}" title="Show in diff">${icon('preview')}<code>${escapeHtml(location)}</code></button>
+      ${thread.isOutdated ? '<span class="thread-tag">outdated</span>' : ''}
+      ${thread.isResolved ? '<span class="thread-tag ok">resolved</span>' : ''}
+      <span class="thread-actions">
+        <button type="button" class="ghost thread-reply-open" data-thread-reply="${escapeHtml(thread.id)}" title="Reply">${icon('comment')}Reply</button>
+        ${thread.canResolve ? `<button type="button" class="ghost thread-resolve" data-thread-resolve="${escapeHtml(thread.id)}" data-resolved="${thread.isResolved ? '1' : '0'}" title="${resolveLabel} thread">${icon(thread.isResolved ? 'refresh' : 'check')}${resolveLabel}</button>` : ''}
+      </span>
+    </header>
+    ${first == null ? '' : commentHtml(first, false)}
+    ${rest.map((comment) => commentHtml(comment, true)).join('')}
+    ${thread.totalComments > thread.comments.length ? `<div class="thread-more muted">${thread.totalComments - thread.comments.length} more on GitHub</div>` : ''}
+    <form class="thread-reply" data-thread-form="${escapeHtml(thread.id)}" hidden>
+      <textarea rows="3" placeholder="Reply… (⌘↵ to send${thread.canResolve && !thread.isResolved ? ', ⌘⇧↵ to send and resolve' : ''})"></textarea>
+      <div class="thread-reply-actions">
+        <button type="button" class="ghost" data-thread-cancel>Cancel <kbd>esc</kbd></button>
+        ${thread.canResolve && !thread.isResolved ? '<button type="button" class="ghost" data-thread-send-resolve>Reply &amp; resolve</button>' : ''}
+        <button type="button" class="primary" data-thread-send>Reply <kbd>⌘</kbd><kbd>↵</kbd></button>
+      </div>
+    </form>
+  </article>`;
+}
+
+function renderThreads(section: HTMLElement, threads: ReviewThread[]): void {
+  currentThreads = threads;
+  const open = threads.filter((thread) => !thread.isResolved);
+  const resolved = threads.length - open.length;
+  section.hidden = threads.length === 0;
+  if (threads.length === 0) return;
+  const shown = showResolvedThreads ? threads : open;
+  section.innerHTML = `<div class="conversation-head"><span>${open.length === 0 ? 'Review threads' : `Open threads <span class="thread-count">${open.length}</span>`}</span>${resolved > 0 ? `<button type="button" class="link-button" data-toggle-resolved>${showResolvedThreads ? 'Hide' : 'Show'} ${resolved} resolved</button>` : ''}</div>
+    <div class="thread-list">${shown.length === 0 ? '<p class="muted thread-empty">All threads resolved.</p>' : shown.map(threadHtml).join('')}</div>`;
+  clampLongComments(section);
+}
+
+async function refreshThreads(pull: PullRequest, description: HTMLElement, token: number, isFresh = false): Promise<void> {
+  const section = description.querySelector<HTMLElement>('[data-threads]');
+  if (section == null) return;
+  try {
+    const threads = await loadThreads(pull, isFresh);
+    if (token !== renderToken) return;
+    renderThreads(section, threads);
+    const open = threads.filter((thread) => !thread.isResolved).length;
+    if (pull.openThreads !== open) {
+      pull.openThreads = open;
+      invalidateList();
+      renderList();
+    }
+  } catch (error) {
+    if (token !== renderToken) return;
+    section.hidden = false;
+    section.innerHTML = `<p class="error">Could not load review threads: ${escapeHtml(errorMessage(error))}</p>`;
+  }
+}
+
+async function toggleThreadResolved(threadId: string, resolved: boolean): Promise<void> {
+  const pull = selectedPull();
+  const section = dom.descPane.querySelector<HTMLElement>('[data-threads]');
+  if (pull == null || section == null) return;
+  const thread = currentThreads.find((candidate) => candidate.id === threadId);
+  if (thread == null) return;
+  const previous = thread.isResolved;
+  thread.isResolved = resolved;
+  renderThreads(section, currentThreads);
+  pull.openThreads = currentThreads.filter((candidate) => !candidate.isResolved).length;
+  invalidateList();
+  renderList();
+  try {
+    await setThreadResolved(threadId, resolved);
+    forgetThreads(pull);
+    toast(resolved ? `Resolved thread on ${thread.path}` : `Reopened thread on ${thread.path}`);
+  } catch (error) {
+    thread.isResolved = previous;
+    renderThreads(section, currentThreads);
+    pull.openThreads = currentThreads.filter((candidate) => !candidate.isResolved).length;
+    invalidateList();
+    renderList();
+    toast(errorMessage(error), true);
+  }
+}
+
+async function sendThreadReply(threadId: string, form: HTMLElement, alsoResolve: boolean): Promise<void> {
+  const pull = selectedPull();
+  const textarea = form.querySelector('textarea');
+  const body = textarea?.value.trim() ?? '';
+  if (pull == null || textarea == null || body === '') return;
+  form.querySelectorAll('button').forEach((button) => (button.disabled = true));
+  try {
+    await replyToThread(threadId, body);
+    if (alsoResolve) await setThreadResolved(threadId, true);
+    toast(alsoResolve ? 'Replied and resolved' : 'Replied');
+    await refreshThreads(pull, dom.descPane, renderToken, true);
+  } catch (error) {
+    form.querySelectorAll('button').forEach((button) => (button.disabled = false));
+    toast(errorMessage(error), true);
+  }
+}
+
+function jumpToThread(threadId: string): void {
+  const thread = currentThreads.find((candidate) => candidate.id === threadId);
+  const file = currentFiles.find((candidate) => candidate.diff.name === thread?.path);
+  if (thread == null || file == null) {
+    toast('That file is not in the current diff', true);
+    return;
+  }
+  if (thread.line != null) diffView.scrollToLine(file.id, thread.line, 'additions');
+  else diffView.scrollToFile(file.id);
+}
+
+function focusFirstOpenThread(): void {
+  const section = dom.descPane.querySelector<HTMLElement>('[data-threads]');
+  const first = section?.querySelector<HTMLElement>('.thread:not(.is-resolved)');
+  if (section == null || first == null) {
+    toast('No open threads on this PR');
+    return;
+  }
+  glideScrollTo(dom.descPane, dom.descPane.scrollTop + first.getBoundingClientRect().top - dom.descPane.getBoundingClientRect().top - 12);
+  flash(first);
+}
+
+dom.descPane.addEventListener('click', (event) => {
+  const target = event.target as HTMLElement;
+  const resolve = target.closest<HTMLElement>('[data-thread-resolve]');
+  if (resolve != null) return void toggleThreadResolved(resolve.dataset.threadResolve ?? '', resolve.dataset.resolved !== '1');
+  const jump = target.closest<HTMLElement>('[data-thread-jump]');
+  if (jump != null) return jumpToThread(jump.dataset.threadJump ?? '');
+  if (target.closest('[data-toggle-resolved]') != null) {
+    showResolvedThreads = !showResolvedThreads;
+    const section = dom.descPane.querySelector<HTMLElement>('[data-threads]');
+    if (section != null) renderThreads(section, currentThreads);
+    return;
+  }
+  const replyOpen = target.closest<HTMLElement>('[data-thread-reply]');
+  if (replyOpen != null) {
+    const form = dom.descPane.querySelector<HTMLElement>(`[data-thread-form="${CSS.escape(replyOpen.dataset.threadReply ?? '')}"]`);
+    if (form != null) {
+      form.hidden = false;
+      form.querySelector('textarea')?.focus();
+    }
+    return;
+  }
+  const form = target.closest<HTMLElement>('[data-thread-form]');
+  if (form == null) return;
+  if (target.closest('[data-thread-cancel]') != null) form.hidden = true;
+  else if (target.closest('[data-thread-send-resolve]') != null) void sendThreadReply(form.dataset.threadForm ?? '', form, true);
+  else if (target.closest('[data-thread-send]') != null) void sendThreadReply(form.dataset.threadForm ?? '', form, false);
+});
+
+dom.descPane.addEventListener('keydown', (event) => {
+  const form = (event.target as HTMLElement).closest<HTMLElement>('[data-thread-form]');
+  if (form == null) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    form.hidden = true;
+    return;
+  }
+  if (event.key === 'Enter' && event.metaKey) {
+    event.preventDefault();
+    event.stopPropagation();
+    void sendThreadReply(form.dataset.threadForm ?? '', form, event.shiftKey);
+  }
+});
+
 function renderConversation(container: Element, items: ConversationItem[]): void {
   const visible = showBotComments ? items : items.filter((item) => !item.isBot);
   const botCount = items.filter((item) => item.isBot).length;
@@ -869,6 +1047,7 @@ function renderDescription(pull: PullRequest): HTMLElement {
     <h1>${escapeHtml(pull.title)}</h1>
     <div class="byline">${avatar(pull)}<b>${escapeHtml(pull.author?.login ?? 'ghost')}</b> opened ${relativeTime(pull.createdAt)} ago · <code>${escapeHtml(pull.headRefName)}</code> → <code>${escapeHtml(pull.baseRefName)}</code></div>
     <div class="markdown">${body}</div>
+    <section class="threads" data-threads hidden></section>
     <section class="conversation" data-conversation><div class="conversation-head"><span>Conversation</span><span class="muted conversation-count"></span></div><div class="conversation-list">${conversationSkeleton()}</div></section>
     <div class="files-divider"><span>${pull.changedFiles} files changed</span><span><i class="add">+${pull.additions}</i> <i class="del">−${pull.deletions}</i></span></div>`;
   return wrapper;
@@ -930,6 +1109,7 @@ function renderDetail(pull: PullRequest): void {
       const section = description.querySelector('[data-conversation]');
       if (section == null) return;
       renderConversation(section, items);
+      void refreshThreads(pull, description, token);
       section.addEventListener('click', (event) => {
         if ((event.target as HTMLElement).closest('[data-toggle-bots]') == null) return;
         showBotComments = !showBotComments;
@@ -1265,7 +1445,7 @@ function applyMergeStates(kind: QueueKind, states: MergeState[]): void {
     const mergeState = byId.get(pull.id);
     if (mergeState == null) return pull;
     if (mergeState.mergeStateStatus !== 'UNKNOWN') mergeStateCache.set(pull.id, { updatedAt: pull.updatedAt, state: mergeState });
-    return { ...pull, mergeable: mergeState.mergeable, mergeStateStatus: mergeState.mergeStateStatus };
+    return { ...pull, mergeable: mergeState.mergeable, mergeStateStatus: mergeState.mergeStateStatus, openThreads: mergeState.openThreads };
   });
   queueCache.set(kind, updated);
   if (kind !== state.kind) return;
@@ -2272,6 +2452,7 @@ const COMMANDS: Command[] = [
   { id: 'smart-small', section: 'Filter', title: 'Show small diffs', aliases: 'tiny quick', keys: ['⌥2'], run: () => setSmartFilter('small') },
   { id: 'smart-recent', section: 'Filter', title: 'Show recently updated', aliases: 'new fresh', keys: ['⌥3'], run: () => setSmartFilter('recent') },
   { id: 'smart-tested', section: 'Filter', title: 'Show end-to-end tested', aliases: 'e2e verified qa proof screenshots recording', keys: ['⌥5'], run: () => setSmartFilter('tested') },
+  { id: 'smart-threads', section: 'Filter', title: 'Show PRs with open review threads', aliases: 'unresolved comments threads feedback', keys: ['⌥6'], run: () => setSmartFilter('threads') },
   { id: 'smart-attention', section: 'Filter', title: 'Show PRs that need attention', aliases: 'unapproved conflicts failing blocked red yellow triage', keys: ['⌥4'], run: () => setSmartFilter('attention') },
   { id: 'paste-order', section: 'Filter', title: 'Sort by a pasted list of PRs (just ⌘V anywhere outside a text box)', aliases: 'paste order ranking priority report clipboard', keys: ['⇧o'], run: () => void navigator.clipboard.readText().then((text) => applyPastedText(text) || toast('No PR numbers found on the clipboard', true), () => toast('Press ⌘V to paste your list', true)) },
   { id: 'paste-order-clear', section: 'Filter', title: 'Clear pasted order', aliases: 'reset sort pasted', keys: ['⌥⌫'], run: () => { setPastedOrder(null); toast('Back to the normal order'); }, isEnabled: () => pastedOrder != null },
@@ -2320,6 +2501,7 @@ const COMMANDS: Command[] = [
   { id: 'toggle-bots', section: 'Pull request', title: 'Show / hide bot comments', aliases: 'devin perry github-actions automated comments conversation', keys: ['⇧b'], run: () => { showBotComments = !showBotComments; localStorage.setItem('showBotComments', showBotComments ? '1' : '0'); const pull = selectedPull(); if (pull != null) renderDetail(pull); toast(showBotComments ? 'Showing bot comments' : 'Hiding bot comments'); } },
   { id: 'diff-style', section: 'Diff', title: 'Toggle split / unified diff', aliases: 'side by side inline view', keys: ['s', '⌘⌥s'], run: toggleStyle },
 
+  { id: 'open-threads', section: 'Pull request', title: 'Jump to open review threads', aliases: 'unresolved comments threads review feedback resolve', keys: ['⇧c'], run: focusFirstOpenThread, isEnabled: hasPull },
   { id: 'comment', section: 'Pull request', title: 'Write a comment', aliases: 'reply message mention devin note', keys: ['c'], run: openCommentDialog, isEnabled: hasPull },
   { id: 'approve', section: 'Pull request', title: 'Approve', aliases: 'lgtm review accept', keys: ['a'], run: () => void approveSelected(), isEnabled: () => { const pull = selectedPull(); return pull != null && !isOwnPull(pull); } },
   { id: 'merge', section: 'Pull request', title: 'Merge (all selected when several are checked)', aliases: 'squash ship land queue', keys: ['⌘↵', 'm'], run: () => void (state.checkedIds.size > 0 ? bulkMerge() : mergeSelected()), isEnabled: () => hasPull() || state.checkedIds.size > 0 },

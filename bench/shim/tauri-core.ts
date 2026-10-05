@@ -11,11 +11,33 @@ const calls: Record<string, number> = {};
 
 Object.assign(window, { __shimCalls: calls });
 
-function mergeStateOf(pull: FixturePull): { id: string; mergeable: string; mergeStateStatus: string } {
+const resolvedThreads = new Set<string>();
+const THREAD_BODIES = ['Can we keep the old behaviour behind a flag until the migration lands?', 'Nit: this name reads as a boolean; maybe <code>shouldAbort</code>?', 'Does this need a test for the empty-query case?'];
+function threadsOf(pull: FixturePull): { id: string; isResolved: boolean; isOutdated: boolean; path: string; line: number; originalLine: number; viewerCanResolve: boolean; comments: { totalCount: number; nodes: unknown[] } }[] {
+  const count = IS_DEMO ? (pull.title.startsWith('perf(search)') ? 3 : pull.number % 4 === 0 ? 1 : 0) : pull.number % 3;
+  return Array.from({ length: count }, (_, index) => {
+    const id = `T_${pull.number}_${index}`;
+    return {
+      id,
+      isResolved: resolvedThreads.has(id) || (IS_DEMO && index === 2),
+      isOutdated: false,
+      path: IS_DEMO && pull.title.startsWith('perf(search)') ? 'src/search/semantic.ts' : `src/module-0/file-${pull.number}-0.ts`,
+      line: 9 + index,
+      originalLine: 9 + index,
+      viewerCanResolve: true,
+      comments: { totalCount: 2, nodes: [
+        { id: `${id}_a`, bodyHTML: `<p>${THREAD_BODIES[index % THREAD_BODIES.length]}</p>`, createdAt: '2026-09-26T10:00:00Z', url: `https://github.com/x/pull/${pull.number}#r1`, author: { login: 'jordan-lee', avatarUrl: '', __typename: 'User' } },
+        { id: `${id}_b`, bodyHTML: '<p>Good call, updating.</p>', createdAt: '2026-09-26T11:00:00Z', url: `https://github.com/x/pull/${pull.number}#r2`, author: { login: 'sam-rivera', avatarUrl: '', __typename: 'User' } },
+      ] },
+    };
+  });
+}
+
+function mergeStateOf(pull: FixturePull): { id: string; mergeable: string; mergeStateStatus: string; reviewThreads: { nodes: { isResolved: boolean; isOutdated: boolean }[] } } {
   const conflicted = IS_DEMO ? DEMO_CONFLICTS.has(pull.id) : pull.number % 13 === 0;
   const failing = pull.commits.nodes[0]?.commit.statusCheckRollup?.state === 'FAILURE';
   const status = conflicted ? 'DIRTY' : pull.isDraft ? 'DRAFT' : failing ? 'UNSTABLE' : pull.reviewDecision === 'APPROVED' ? 'CLEAN' : 'BLOCKED';
-  return { id: pull.id, mergeable: conflicted ? 'CONFLICTING' : 'MERGEABLE', mergeStateStatus: status };
+  return { id: pull.id, mergeable: conflicted ? 'CONFLICTING' : 'MERGEABLE', mergeStateStatus: status, reviewThreads: { nodes: threadsOf(pull).map(({ isResolved, isOutdated }) => ({ isResolved, isOutdated })) } };
 }
 
 const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
@@ -30,6 +52,13 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   ] }, reviews: { totalCount: 0, nodes: [] } } } } }),
   viewer: () => (IS_DEMO ? 'jordan-lee' : 'someone-else'),
   comment: (args) => `https://github.com/${String(args.repo)}/pull/${String(args.number)}#issuecomment-1`,
+  threads: (args) => JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: threadsOf(byNumber.get(args.number as number) ?? pulls[0]!) } } } } }),
+  set_thread_resolved: (args) => {
+    if (args.resolved === true) resolvedThreads.add(String(args.threadId));
+    else resolvedThreads.delete(String(args.threadId));
+    return JSON.stringify({ data: {} });
+  },
+  reply_to_thread: () => JSON.stringify({ data: {} }),
   merge_queue: () => JSON.stringify({ data: { repository: { mergeQueue: null } } }),
   readiness_available: () => false,
   review_context: () => { throw new Error('offline harness'); },

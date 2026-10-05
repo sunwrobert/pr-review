@@ -113,7 +113,7 @@ async fn merge_states(ids: Vec<String>) -> Result<String, String> {
     if ids.is_empty() || ids.len() > MAX_MERGE_STATE_IDS || !ids.iter().all(|id| is_node_id(id)) {
         return Err("invalid pull request ids".to_string());
     }
-    let query = "query($ids: [ID!]!) { nodes(ids: $ids) { ... on PullRequest { id mergeable mergeStateStatus } } }";
+    let query = "query($ids: [ID!]!) { nodes(ids: $ids) { ... on PullRequest { id mergeable mergeStateStatus reviewThreads(first: 100) { nodes { isResolved isOutdated } } } } }";
     let mut args: Vec<String> = vec!["api".into(), "graphql".into(), "-f".into(), format!("query={query}")];
     for id in &ids {
         args.push("-f".into());
@@ -121,6 +121,43 @@ async fn merge_states(ids: Vec<String>) -> Result<String, String> {
     }
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     gh(&borrowed).await
+}
+
+#[tauri::command]
+async fn threads(repo: String, number: u64) -> Result<String, String> {
+    validate_repo(&repo)?;
+    let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
+    let query = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { id isResolved isOutdated path line originalLine diffSide viewerCanResolve comments(first: 30) { totalCount nodes { id bodyHTML createdAt url author { login avatarUrl __typename } } } } } } } }";
+    gh(&[
+        "api", "graphql",
+        "-f", &format!("query={query}"),
+        "-F", &format!("owner={owner}"),
+        "-F", &format!("name={name}"),
+        "-F", &format!("number={number}"),
+    ])
+    .await
+}
+
+#[tauri::command]
+async fn set_thread_resolved(thread_id: String, resolved: bool) -> Result<String, String> {
+    if !is_node_id(&thread_id) {
+        return Err("invalid thread id".to_string());
+    }
+    let mutation = if resolved { "resolveReviewThread" } else { "unresolveReviewThread" };
+    let query = format!("mutation($id: ID!) {{ {mutation}(input: {{ threadId: $id }}) {{ thread {{ id isResolved }} }} }}");
+    gh(&["api", "graphql", "-f", &format!("query={query}"), "-F", &format!("id={thread_id}")]).await
+}
+
+#[tauri::command]
+async fn reply_to_thread(thread_id: String, body: String) -> Result<String, String> {
+    if !is_node_id(&thread_id) {
+        return Err("invalid thread id".to_string());
+    }
+    if body.trim().is_empty() || body.len() > MAX_COMMENT_BYTES {
+        return Err("reply must be between 1 and 65000 bytes".to_string());
+    }
+    let query = "mutation($id: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $id, body: $body }) { comment { id } } }";
+    gh(&["api", "graphql", "-f", &format!("query={query}"), "-F", &format!("id={thread_id}"), "-f", &format!("body={body}")]).await
 }
 
 #[tauri::command]
@@ -364,7 +401,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, viewer, comment, merge_queue, merge_states, conversation, body, diff, approve, merge, open_in_browser, review_context, readiness_available, readiness])
+        .invoke_handler(tauri::generate_handler![queue, viewer, comment, threads, set_thread_resolved, reply_to_thread, merge_queue, merge_states, conversation, body, diff, approve, merge, open_in_browser, review_context, readiness_available, readiness])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }

@@ -883,3 +883,39 @@ kbd[data-glyph='backspace'] { --kbd-glyph: url("data:image/svg+xml,%3Csvg%20xmln
 ::highlight(pr-find) { background-color: color-mix(in srgb, var(--wait) 35%, transparent); color: inherit; }
 ::highlight(pr-find-current) { background-color: color-mix(in srgb, var(--wait) 85%, transparent); color: #111; }
 @media (prefers-reduced-motion: reduce) { .find-bar { animation: none; } }
+
+/* Review threads */
+.thread-pill { display: inline-flex; align-items: center; gap: 3px; padding: 0 6px; height: 17px; border-radius: 999px; font-size: 10.5px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--wait); background: color-mix(in srgb, var(--wait) 14%, transparent); }
+.thread-pill .ico { width: 11px; height: 11px; stroke-width: 2.25; }
+.chip-threads .ico { color: var(--wait); }
+.threads { margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--border-soft); }
+.threads[hidden] { display: none; }
+.thread-count { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; margin-left: 4px; border-radius: 999px; font-size: 11px; color: var(--wait); background: color-mix(in srgb, var(--wait) 16%, transparent); }
+.thread-list { display: flex; flex-direction: column; gap: 10px; }
+.thread { border: 1px solid var(--border-soft); border-left: 3px solid var(--wait); border-radius: 10px; background: var(--bg-elev); overflow: hidden; }
+.thread.is-resolved { border-left-color: var(--ok); opacity: .7; }
+.thread-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; border-bottom: 1px solid var(--border-soft); }
+.thread-loc { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 2px 6px; border: 0; border-radius: 5px; background: none; color: var(--text-2); }
+.thread-loc:hover { background: var(--bg-hover); color: var(--text); }
+.thread-loc code { font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 320px; }
+.thread-loc .ico { width: 13px; height: 13px; flex: none; }
+.thread-tag { flex: none; padding: 0 6px; border-radius: 999px; font-size: 10.5px; color: var(--text-3); background: var(--bg-hover); }
+.thread-tag.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.thread-actions { margin-left: auto; display: flex; gap: 4px; flex: none; }
+.thread-actions button { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px; font-size: 12px; }
+.thread-actions .ico { width: 13px; height: 13px; }
+.thread-resolve[data-resolved='0']:hover { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border)); }
+.thread-comment { padding: 8px 12px 4px; }
+.thread-comment.is-reply { border-top: 1px dashed var(--border-soft); padding-left: 24px; }
+.thread-comment > header { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-3); }
+.thread-comment > header b { color: var(--text); font-weight: 600; }
+.thread-comment > header .avatar { width: 18px; height: 18px; }
+.thread-comment .comment-body { padding: 6px 0 8px; }
+.thread-more { padding: 4px 12px 8px; font-size: 12px; }
+.thread-empty { padding: 4px 2px; }
+.thread-reply { padding: 8px 12px 12px; border-top: 1px solid var(--border-soft); }
+.thread-reply[hidden] { display: none; }
+.thread-reply textarea { width: 100%; min-height: 64px; resize: vertical; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--text); font: 13px/1.5 'Inter Variable', Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif; outline: none; }
+.thread-reply textarea:focus { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
+.thread-reply-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
+.thread.flash { animation: flash-ring .5s var(--ease-out); }

@@ -25,12 +25,21 @@ export interface PullRequest {
   repository: { nameWithOwner: string };
   checkState: CheckState | null;
   queueEntry: { position: number; state: string } | null;
+  openThreads?: number;
 }
 
 export interface MergeState {
   id: string;
   mergeable: MergeableState;
   mergeStateStatus: string;
+  openThreads: number;
+}
+
+interface RawMergeState {
+  id: string;
+  mergeable: MergeableState;
+  mergeStateStatus: string;
+  reviewThreads?: { nodes: { isResolved: boolean; isOutdated: boolean }[] };
 }
 
 interface RawPullRequest extends Omit<PullRequest, 'checkState' | 'mergeable' | 'mergeStateStatus' | 'queueEntry'> {
@@ -54,7 +63,7 @@ function toPullRequest({ commits, mergeQueueEntry, ...pull }: RawPullRequest): P
 const MERGE_STATE_BATCH = 20;
 
 interface MergeStateResponse {
-  data?: { nodes: (MergeState | null)[] };
+  data?: { nodes: (RawMergeState | null)[] };
   errors?: { message: string }[];
 }
 
@@ -64,7 +73,7 @@ export async function fetchMergeStates(ids: readonly string[], onBatch: (states:
     batches.map(async (batch) => {
       const response: MergeStateResponse = JSON.parse(await invoke<string>('merge_states', { ids: batch }));
       if (response.data == null) throw new Error(response.errors?.map((error) => error.message).join('; ') ?? 'Empty response');
-      onBatch(response.data.nodes.filter((node): node is MergeState => node?.id != null));
+      onBatch(response.data.nodes.filter((node): node is RawMergeState => node?.id != null).map(({ reviewThreads, ...rest }) => ({ ...rest, openThreads: (reviewThreads?.nodes ?? []).filter((thread) => !thread.isResolved).length })));
     }),
   );
   const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
