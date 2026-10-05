@@ -295,6 +295,12 @@ img { -webkit-user-drag: none; }
 .chip-meta .arrow { color: var(--text-4); }
 .chip-meta.conflicts { gap: 5px; color: var(--bad); background: color-mix(in srgb, var(--bad) 13%, transparent); border-color: color-mix(in srgb, var(--bad) 35%, transparent); font-weight: 600; }
 .chip-meta.conflicts svg { width: 13px; height: 13px; flex: none; }
+.status-bar .fix-conflicts { flex: none; display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 6px 0 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-elev); color: var(--text); font: inherit; font-size: 12px; font-weight: 500; cursor: pointer; transition: background-color .12s, opacity .12s; }
+.status-bar .fix-conflicts:hover:not(:disabled) { background: var(--bg-hover); }
+.status-bar .fix-conflicts:disabled { opacity: .5; cursor: progress; }
+.status-bar .fix-conflicts .devin-logo { width: 13px; height: 13px; flex: none; }
+.status-bar .fix-conflicts kbd { margin: 0; padding: 1px 4px; font-size: 10px; min-width: 0; }
+.status-bar .fix-conflicts kbd + kbd { margin-left: -3px; }
 .chip-meta.delta { gap: 5px; font-variant-numeric: tabular-nums; }
 .meta-sep { width: 1px; height: 16px; background: var(--border); margin: 0 6px; flex: none; }
 .spinner { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--text-4); border-top-color: var(--accent); animation: spin .8s linear infinite; }
@@ -925,3 +931,6 @@ kbd[data-glyph='backspace'] { --kbd-glyph: url("data:image/svg+xml,%3Csvg%20xmln
 .threads-badge { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; margin-left: -2px; border-radius: 999px; font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--bg); background: var(--wait); }
 .threads-badge[hidden] { display: none; }
 #pr-head .actions .threads-button:has(.threads-badge:not([hidden])) svg { color: var(--wait); }
+
+#triage .triage-devin { display: inline-flex; align-items: center; gap: 6px; }
+#triage .triage-devin .devin-logo { width: 13px; height: 13px; }

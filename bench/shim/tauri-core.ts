@@ -52,7 +52,7 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     { id: 'c3', bodyHTML: '<h3>🚀 Web Preview Deployed</h3><p><a href="https://pr-47520.preview.openrouter.ai">https://pr-47520.preview.openrouter.ai</a></p>', createdAt: '2026-09-26T11:30:00Z', url: 'https://github.com/o/web/pull/1#c3', author: { login: 'github-actions', avatarUrl: '', __typename: 'Bot' } },
     { id: 'c2', bodyHTML: '<p>Link to Devin session: <a href="https://openrouter.devinenterprise.com/sessions/38cc6d851fef40258406d2df3132a5c1">session</a></p>', createdAt: '2026-09-26T11:00:00Z', url: 'https://github.com/o/web/pull/1#c2', author: { login: 'devin-ai-integration', avatarUrl: '', __typename: 'Bot' } },
   ] }, reviews: { totalCount: 0, nodes: [] } } } } }),
-  message_devin: async (args) => { await new Promise((resolve) => setTimeout(resolve, 300)); return `ack: ${String(args.message).slice(0, 40)}`; },
+  message_devin: async (args) => { await new Promise((resolve) => setTimeout(resolve, 300)); ((globalThis as unknown as { devinSends?: unknown[] }).devinSends ??= []).push({ sessionId: args.sessionId, message: args.message }); return 'delivered'; },
   viewer: () => (IS_DEMO ? 'jordan-lee' : 'someone-else'),
   comment: (args) => `https://github.com/${String(args.repo)}/pull/${String(args.number)}#issuecomment-1`,
   threads: (args) => JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: threadsOf(byNumber.get(args.number as number) ?? pulls[0]!) } } } } }),

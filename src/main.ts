@@ -7,7 +7,7 @@ import { findInDiff, findInDom, type FindHit } from './find-in-pr';
 import { applyPastedOrder, parsePastedOrder, type PastedOrder } from './pasted-order';
 import { watchKbdGlyphs } from './kbd-glyphs';
 import { animateDialogCancel, flash, glideScrollBy, glideScrollTo, setVisibleWithMotion } from './motion';
-import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, isConflicted, needsAttention, prStatus, type AttentionReason } from './status';
+import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, isConflicted, isFailing, needsAttention, prStatus, type AttentionReason } from './status';
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
@@ -92,6 +92,7 @@ const dom = {
   triageTitle: element('triage-title'),
   triageSections: element('triage-sections'),
   triageCopy: element<HTMLButtonElement>('triage-copy'),
+  triageDevin: element<HTMLButtonElement>('triage-devin'),
   bulkConfirmTitle: element('bulk-confirm-title'),
   bulkConfirmList: element('bulk-confirm-list'),
   bulkConfirmNote: element('bulk-confirm-note'),
@@ -1073,6 +1074,25 @@ function renderDescription(pull: PullRequest): HTMLElement {
 }
 
 
+const DEVIN_LOGO = '<svg class="devin-logo" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M5.9 1.6 8.3 3v2.8L5.9 7.2 3.5 5.8V3zM11.1 4.6l2.4 1.4v2.8l-2.4 1.4-2.4-1.4V6zM5.9 8.8l2.4 1.4V13l-2.4 1.4L3.5 13v-2.8z"/><path d="M8.2 5.7 8.9 6.2M8.2 10.3 8.9 9.8" stroke="currentColor" stroke-width="1.2"/></svg>';
+const BULK_FIX_MESSAGE = 'Fix CI and merge conflicts if any';
+
+function devinFixMessage(pull: PullRequest): string | null {
+  const conflicted = isConflicted(pull);
+  const failing = isFailing(pull);
+  if (conflicted && failing) return 'Fix CI and merge conflicts';
+  if (conflicted) return 'Fix merge conflicts';
+  if (failing) return 'Fix CI';
+  return null;
+}
+
+function fixButton(pull: PullRequest): string {
+  const message = devinFixMessage(pull);
+  if (message == null) return '';
+  const disabled = fixingWithDevin.has(pull.id) ? ' disabled' : '';
+  return `<button type="button" class="fix-conflicts" id="fix-with-devin" title="Send “${message}” to the linked Devin session  ⇧F"${disabled}>${DEVIN_LOGO}<span>Fix with Devin</span><kbd>⇧</kbd><kbd>F</kbd></button>`;
+}
+
 function chip(content: string, title: string, className = ''): string {
   return `<span class="chip-meta ${className}" title="${escapeHtml(title)}">${content}</span>`;
 }
@@ -1086,6 +1106,8 @@ function renderDetailMeta(pull: PullRequest): void {
     chip(`${avatar(pull)}${escapeHtml(pull.author?.login ?? 'ghost')}`, 'Author', 'plain'),
     chip(`<code>${escapeHtml(pull.headRefName)}</code><span class="arrow">→</span><code>${escapeHtml(pull.baseRefName)}</code>`, `${pull.headRefName} → ${pull.baseRefName}`, 'plain branch'),
     isConflicted(pull) ? chip(`${icon('conflict')}Merge conflicts`, `${pull.headRefName} conflicts with ${pull.baseRefName}: rebase or merge ${pull.baseRefName} to fix`, 'conflicts tone-bad') : '',
+    isFailing(pull) ? chip(`${icon('x')}Required checks failing`, `Failing required checks: ${(pull.failingRequired ?? []).join(', ') || 'see GitHub'}`, 'conflicts tone-bad') : '',
+    fixButton(pull),
     `<span class="status-summary" title="${escapeHtml(summary)}">${statusIcon(pull)}</span>`,
   ].join('');
   dom.merge.disabled = pull.isDraft || pull.mergeable === 'CONFLICTING' || pull.queueEntry != null || leaving.has(pull.id);
@@ -2190,6 +2212,7 @@ function renderTriageSummary(): void {
   const count = triageTargets(triageIncluded()).length;
   dom.triageCopy.disabled = count === 0;
   dom.triageCopy.firstChild!.textContent = `Copy prompt for ${count} PR${count === 1 ? '' : 's'} `;
+  dom.triageDevin.disabled = count === 0;
 }
 
 function openTriage(): void {
@@ -2214,11 +2237,21 @@ function openTriage(): void {
 }
 
 dom.triage.addEventListener('change', renderTriageSummary);
+dom.triage.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey) || dom.triageDevin.disabled) return;
+  event.preventDefault();
+  event.stopPropagation();
+  dom.triage.close('devin');
+});
 dom.triage.addEventListener('close', () => {
-  if (dom.triage.returnValue !== 'copy') return;
   const included = triageIncluded();
   const targets = triageTargets(included);
   if (targets.length === 0) return;
+  if (dom.triage.returnValue === 'devin') {
+    void sendTriageToDevin(targets);
+    return;
+  }
+  if (dom.triage.returnValue !== 'copy') return;
   void navigator.clipboard.writeText(buildAgentPrompt(targets, included)).then(
     () => toast(`Copied agent prompt for ${targets.length} PR${targets.length === 1 ? '' : 's'} · paste it into your agent`),
     () => toast('Clipboard unavailable', true),
@@ -2451,12 +2484,79 @@ function sendToDevin(pull: PullRequest, sessionId: string, body: string): void {
   dom.commentBody.value = '';
   commentTarget = null;
   dom.commentDialog.close();
+  deliverToDevin(pull, sessionId, body);
+}
+
+const fixingWithDevin = new Set<string>();
+
+async function devinSessionFor(pull: PullRequest): Promise<string | null> {
+  const url = await findDevinSession(pull);
+  return url == null ? null : devinSessionId(url);
+}
+
+function setFixButtonBusy(pull: PullRequest, isBusy: boolean): void {
+  if (isBusy) fixingWithDevin.add(pull.id);
+  else fixingWithDevin.delete(pull.id);
+  const button = document.getElementById('fix-with-devin') as HTMLButtonElement | null;
+  if (button != null && selectedPull()?.id === pull.id) button.disabled = isBusy;
+}
+
+async function fixWithDevin(): Promise<void> {
+  const pull = selectedPull();
+  const message = pull == null ? null : devinFixMessage(pull);
+  if (pull == null || message == null || fixingWithDevin.has(pull.id)) return;
+  setFixButtonBusy(pull, true);
+  const sessionId = await devinSessionFor(pull);
+  if (sessionId == null) {
+    setFixButtonBusy(pull, false);
+    toast(`No Devin session linked on #${pull.number}`, true);
+    return;
+  }
+  deliverToDevin(pull, sessionId, message, () => setFixButtonBusy(pull, false));
+}
+
+const DEVIN_BULK_CONCURRENCY = 4;
+
+async function sendTriageToDevin(targets: readonly PullRequest[]): Promise<void> {
+  toast(`Finding Devin sessions for ${targets.length} PR${targets.length === 1 ? '' : 's'}…`);
+  const outcomes: ('sent' | 'no-session' | 'failed')[] = [];
+  const failures: string[] = [];
+  const queue = [...targets];
+  const worker = async (): Promise<void> => {
+    for (let pull = queue.shift(); pull != null; pull = queue.shift()) {
+      const sessionId = await devinSessionFor(pull).catch(() => null);
+      if (sessionId == null) {
+        outcomes.push('no-session');
+        continue;
+      }
+      await messageDevinSession(sessionId, BULK_FIX_MESSAGE).then(
+        () => outcomes.push('sent'),
+        (error: unknown) => {
+          outcomes.push('failed');
+          failures.push(`#${pull.number}: ${errorMessage(error)}`);
+        },
+      );
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(DEVIN_BULK_CONCURRENCY, targets.length) }, worker));
+  const count = (outcome: string): number => outcomes.filter((value) => value === outcome).length;
+  const parts = [`Sent “${BULK_FIX_MESSAGE}” to ${count('sent')} Devin session${count('sent') === 1 ? '' : 's'}`];
+  if (count('no-session') > 0) parts.push(`${count('no-session')} without a session`);
+  if (count('failed') > 0) parts.push(`${count('failed')} failed (${failures[0]})`);
+  toast(parts.join(' · '), count('failed') > 0 || count('sent') === 0);
+}
+
+function deliverToDevin(pull: PullRequest, sessionId: string, body: string, onSettled?: () => void): void {
   toast(`Sending to Devin about #${pull.number}…`);
   void messageDevinSession(sessionId, body).then(
-    () => toast(`Sent to Devin · #${pull.number} (D opens the session)`),
+    () => {
+      onSettled?.();
+      toast(`Sent to Devin · #${pull.number} (D opens the session)`);
+    },
     (error: unknown) => {
-      commentDrafts.set(`devin:${pull.id}`, body);
-      toast(`Devin message failed (draft kept): ${errorMessage(error)}`, true);
+      onSettled?.();
+      if (onSettled == null) commentDrafts.set(`devin:${pull.id}`, body);
+      toast(`Devin message failed: ${errorMessage(error)}`, true);
     },
   );
 }
@@ -2485,6 +2585,9 @@ element('comment-button').addEventListener('click', openCommentDialog);
 element('threads-button').addEventListener('click', focusFirstOpenThread);
 element('open-devin').addEventListener('click', () => void openDevinSession());
 element('message-devin').addEventListener('click', () => void openDevinMessageDialog());
+dom.statusBar.addEventListener('click', (event) => {
+  if ((event.target as HTMLElement).closest('#fix-with-devin') != null) void fixWithDevin();
+});
 element('open-preview').addEventListener('click', () => void openPreview());
 
 function openThemePicker(): void {
@@ -2571,6 +2674,7 @@ const COMMANDS: Command[] = [
   { id: 'media', section: 'Navigate', title: 'Open first image / video / HTML preview', aliases: 'lightbox screenshot media picture gif recording', keys: ['i', '⌘⇧i'], run: () => openMedia(0), isEnabled: hasPull },
   { id: 'description', section: 'Navigate', title: 'Jump to description', keys: ['⌘↑'], run: () => diffView.scrollToTop(), isEnabled: hasPull },
   { id: 'devin', section: 'Pull request', title: 'Open Devin session', aliases: 'devin agent session link', keys: ['d'], run: () => void openDevinSession(), isEnabled: hasPull },
+  { id: 'fix-with-devin', section: 'Pull request', title: 'Fix CI / merge conflicts with Devin', aliases: 'conflict rebase devin resolve merge fix ci checks failing', keys: ['⇧f'], run: () => void fixWithDevin(), isEnabled: () => { const pull = selectedPull(); return pull != null && devinFixMessage(pull) != null; } },
   { id: 'message-devin', section: 'Pull request', title: 'Message Devin session', aliases: 'devin agent session send tell ask chat', keys: ['⇧d'], run: () => void openDevinMessageDialog(), isEnabled: hasPull },
 
   ...VIM_COMMANDS,
