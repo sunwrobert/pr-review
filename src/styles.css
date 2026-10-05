@@ -865,3 +865,7 @@ kbd[data-glyph='backspace'] { --kbd-glyph: url("data:image/svg+xml,%3Csvg%20xmln
 .update-pill[hidden] { display: none; }
 .update-pill .ico { width: 12px; height: 12px; stroke-width: 2.25; }
 .update-pill:hover { filter: brightness(1.08); }
+.chip-pasted { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.chip-pasted[hidden] { display: none; }
+.chip-pasted .pasted-clear { margin-left: 2px; padding: 0 3px; border-radius: 4px; color: var(--text-3); font-size: 13px; line-height: 1; }
+.chip-pasted .pasted-clear:hover { color: var(--text); background: var(--bg-hover); }

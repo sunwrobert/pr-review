@@ -14,6 +14,7 @@ A fast, keyboard-first macOS app for reviewing and merging GitHub pull requests.
 - **Diffs:** [`@pierre/diffs`](https://www.npmjs.com/package/@pierre/diffs), virtualized and syntax-highlighted in web workers. Collapsible files and sticky headers.
 - **Preview:** `P` opens the preview deployment found in bot comments or the body (for example `pr-123.preview.example.com`, Vercel, Netlify, Cloudflare Pages); the header button is disabled when there is none.
 - **Devin:** `D` opens the Devin session linked in the PR body or comments; the header button is disabled when there is none.
+- **Paste an order:** copy any text that mentions PRs (a ranked report, a Slack message, a list of `#123` or `/pull/123` links) and press `⌘V` anywhere outside a text box. The list re-sorts to your order, grouped under the headings from your text, with everything else after. A **Pasted** chip shows how many matched; `⌥⌫` or its × goes back to normal.
 - **Comments:** long comments are capped with a Show more toggle, so scrolling never gets stuck inside one. `C` opens a comment box on the current PR (drafts are kept per PR); `⌘↵` posts it through `gh`.
 - **Layout:** description on the left, diff on the right. Panes resize and hide, and `1`–`3` apply preset proportions.
 - **Smart search (Jev):** typing a topic like `frontend` or `billing` also finds PRs that don't contain the word, tagged **Jev** in the list. Literal matches still appear instantly.

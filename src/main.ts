@@ -2,6 +2,7 @@ import { hydrateIcons, icon } from './icons';
 import { attachScrollFade } from './scroll-fade';
 import { startAutoUpdate } from './updater';
 import { StableOrder } from './stable-order';
+import { applyPastedOrder, parsePastedOrder, type PastedOrder } from './pasted-order';
 import { watchKbdGlyphs } from './kbd-glyphs';
 import { animateDialogCancel, flash, glideScrollBy, glideScrollTo, setVisibleWithMotion } from './motion';
 import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, needsAttention, prStatus, type AttentionReason } from './status';
@@ -270,6 +271,17 @@ function scheduleSemanticSearch(): void {
 }
 
 const stableOrder = new StableOrder();
+const PASTED_ORDER_KEY = 'pastedOrder.v1';
+let pastedOrder: PastedOrder | null = loadPastedOrder();
+
+function loadPastedOrder(): PastedOrder | null {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PASTED_ORDER_KEY) ?? 'null') as { numbers: number[]; headings: [number, string][] } | null;
+    return saved == null ? null : { numbers: saved.numbers, headings: new Map(saved.headings) };
+  } catch {
+    return null;
+  }
+}
 const leaving = new Map<string, { pull: PullRequest; label: string; isPending?: boolean }>();
 let listCacheKey = '';
 let filteredCache: PullRequest[] = [];
@@ -281,7 +293,7 @@ function invalidateList(): void {
 }
 
 function currentListKey(): string {
-  return [listVersion, leaving.size, state.pulls, state.filter, state.smartFilter, state.sortOrder, isGrouped, groups, semanticQuery, semanticScores, aiResults.size, collapsedGroups.size].map((part) => (typeof part === 'object' ? objectId(part) : String(part))).join('|');
+  return [listVersion, leaving.size, pastedOrder?.numbers.length ?? -1, state.pulls, state.filter, state.smartFilter, state.sortOrder, isGrouped, groups, semanticQuery, semanticScores, aiResults.size, collapsedGroups.size].map((part) => (typeof part === 'object' ? objectId(part) : String(part))).join('|');
 }
 
 const objectIds = new WeakMap<object, number>();
@@ -310,7 +322,7 @@ function computeLists(): void {
   const now = Date.now();
   const matching = state.pulls.filter((pull) => (state.smartFilter === 'attention' ? isMergeStateSettled(pull) && needsAttention(pull) : state.smartFilter === 'tested' ? isTested(pull) : matchesSmartFilter(pull, state.smartFilter, now)) && matchesText(pull, needle));
   const ranked = sortPulls(matching, state.sortOrder, now, aiScoreFor);
-  filteredCache = stableOrder.apply(withLeaving(ranked), [state.kind, state.smartFilter, state.sortOrder, needle, isGrouped].join('|'));
+  filteredCache = pastedOrder != null ? withLeaving(applyPastedOrder(ranked, pastedOrder)) : stableOrder.apply(withLeaving(ranked), [state.kind, state.smartFilter, state.sortOrder, needle, isGrouped].join('|'));
   visibleCache = !isGrouped || groups.length === 0 ? filteredCache : listSections(filteredCache).flatMap((section) => (section.group != null && collapsedGroups.has(section.group.id) ? [] : section.pulls));
 }
 
@@ -492,7 +504,20 @@ interface ListSection {
   pulls: PullRequest[];
 }
 
+function pastedSections(pulls: PullRequest[], order: PastedOrder): ListSection[] {
+  const sections: ListSection[] = [];
+  for (const pull of pulls) {
+    const label = order.headings.get(pull.number) ?? (order.numbers.includes(pull.number) ? 'Pasted order' : 'Not in pasted list');
+    const last = sections.at(-1);
+    if (last?.group?.label === label) last.pulls.push(pull);
+    else sections.push({ group: { id: `pasted:${sections.length}:${label}`, label, pullIds: [] }, pulls: [pull] });
+  }
+  sections.forEach((section) => section.group != null && (section.group.pullIds = section.pulls.map((pull) => pull.id)));
+  return sections;
+}
+
 function listSections(pulls: PullRequest[]): ListSection[] {
+  if (pastedOrder != null) return pastedSections(pulls, pastedOrder);
   if (!isGrouped || groups.length === 0) return [{ group: null, pulls }];
   const averages = new Map<string, number>();
   const averageFor = (section: ListSection): number => {
@@ -725,8 +750,26 @@ function renderConversation(container: Element, items: ConversationItem[]): void
   if (count != null) count.innerHTML = `${items.length} · <button class="link-button" data-toggle-bots>${showBotComments ? 'Hide' : 'Show'} ${botCount} bot${botCount === 1 ? '' : 's'}</button>`;
   const list = container.querySelector('.conversation-list');
   if (list == null) return;
-  list.innerHTML = visible.length === 0 ? `<p class="muted">${items.length === 0 ? 'No comments yet.' : 'Only bot comments · hidden.'}</p>` : visible.map(conversationItemHtml).join('');
-  list.classList.add('fade-in');
+  const signature = visible.map((item) => `${item.id}:${item.html.length}:${item.reviewState ?? ''}`).join('|');
+  if (list.getAttribute('data-signature') === signature) return;
+  const isFirstRender = !list.hasAttribute('data-signature');
+  list.setAttribute('data-signature', signature);
+  if (visible.length === 0) list.innerHTML = `<p class="muted">${items.length === 0 ? 'No comments yet.' : 'Only bot comments · hidden.'}</p>`;
+  else {
+    const existing = new Map([...list.querySelectorAll<HTMLElement>('[data-comment-id]')].map((node) => [node.dataset.commentId ?? '', node]));
+    const nodes = visible.map((item) => {
+      const kept = existing.get(item.id);
+      if (kept != null && kept.dataset.commentSize === String(item.html.length)) return kept;
+      const holder = document.createElement('div');
+      holder.innerHTML = conversationItemHtml(item);
+      const node = holder.firstElementChild as HTMLElement;
+      node.dataset.commentId = item.id;
+      node.dataset.commentSize = String(item.html.length);
+      return node;
+    });
+    list.replaceChildren(...nodes);
+  }
+  if (isFirstRender) list.classList.add('fade-in');
   preloadImages(imageUrlsInHtml(visible.map((item) => item.html).join('')));
   clampLongComments(list);
 }
@@ -904,7 +947,9 @@ function renderDetail(pull: PullRequest): void {
       if (token !== renderToken) return;
       const target = description.querySelector('.markdown');
       if (target != null) {
-        target.innerHTML = descriptionHtml(bodyHtml);
+        const html = descriptionHtml(bodyHtml);
+        target.innerHTML = html;
+        target.setAttribute('data-body', html);
         target.classList.add('fade-in');
       }
     },
@@ -1350,12 +1395,88 @@ function applyQueue(pulls: PullRequest[]): void {
   renderList();
   const stillThere = previous == null ? undefined : pulls.find((pull) => pull.id === previous.id);
   if (stillThere != null) {
-    if (stillThere.updatedAt !== previous?.updatedAt) void select(stillThere);
+    if (stillThere.updatedAt !== previous?.updatedAt) refreshSelectedInPlace(stillThere);
     return;
   }
   const first = visiblePulls()[0];
   if (first != null) void select(first);
 }
+
+/** Updates the open PR after a background refresh without rebuilding the description, so images and scroll stay put. */
+function refreshSelectedInPlace(pull: PullRequest): void {
+  renderDetailMeta(pull);
+  syncQueueState(pull);
+  const token = renderToken;
+  bodyCache.delete(diffKey(pull));
+  void loadBody(pull).then((bodyHtml) => {
+    if (token !== renderToken || state.selectedId !== pull.id) return;
+    const target = dom.descPane.querySelector('.description .markdown');
+    if (target == null) return;
+    const next = descriptionHtml(bodyHtml);
+    if (target.getAttribute('data-body') === next) return;
+    patchHtml(target, next);
+  }, () => undefined);
+  invalidateConversation(pull);
+  void loadConversation(pull).then((items) => {
+    if (token !== renderToken || state.selectedId !== pull.id) return;
+    const section = dom.descPane.querySelector('[data-conversation]');
+    if (section != null) renderConversation(section, items);
+  }, () => undefined);
+}
+
+/** Replaces children only where the markup differs, keeping existing <img>/<video> nodes (and their decoded pixels) alive. */
+function patchHtml(target: Element, html: string): void {
+  target.setAttribute('data-body', html);
+  const next = document.createElement('div');
+  next.innerHTML = html;
+  const current = [...target.children];
+  const incoming = [...next.children];
+  if (current.length !== incoming.length) {
+    target.replaceChildren(...incoming);
+    return;
+  }
+  incoming.forEach((node, index) => {
+    const existing = current[index];
+    if (existing != null && existing.outerHTML !== node.outerHTML) existing.replaceWith(node);
+  });
+}
+
+function setPastedOrder(order: PastedOrder | null): void {
+  pastedOrder = order;
+  if (order == null) localStorage.removeItem(PASTED_ORDER_KEY);
+  else localStorage.setItem(PASTED_ORDER_KEY, JSON.stringify({ numbers: order.numbers, headings: [...order.headings] }));
+  invalidateList();
+  renderList();
+  renderPastedChip();
+  const first = visiblePulls()[0];
+  if (order != null && first != null) void select(first);
+}
+
+function renderPastedChip(): void {
+  const chip = document.getElementById('pasted-order');
+  if (chip == null) return;
+  chip.hidden = pastedOrder == null;
+  if (pastedOrder == null) return;
+  const matched = state.pulls.filter((pull) => pastedOrder?.numbers.includes(pull.number)).length;
+  chip.querySelector('.pasted-count')!.textContent = `${matched}/${pastedOrder.numbers.length}`;
+}
+
+function applyPastedText(text: string): boolean {
+  const order = parsePastedOrder(text);
+  if (order.numbers.length < 2) return false;
+  setPastedOrder(order);
+  const matched = state.pulls.filter((pull) => order.numbers.includes(pull.number)).length;
+  const missing = order.numbers.length - matched;
+  toast(`Sorted by your list · ${matched} PR${matched === 1 ? '' : 's'} in this view${missing > 0 ? ` · ${missing} not here (other view or closed)` : ''} · ⌥⌫ to clear`);
+  return true;
+}
+
+document.addEventListener('paste', (event) => {
+  const target = event.target;
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || (target instanceof HTMLElement && target.isContentEditable)) return;
+  const text = event.clipboardData?.getData('text/plain') ?? '';
+  if (applyPastedText(text)) event.preventDefault();
+});
 
 function switchKind(kind: QueueKind): void {
   state.kind = kind;
@@ -2043,6 +2164,8 @@ const COMMANDS: Command[] = [
   { id: 'smart-recent', section: 'Filter', title: 'Show recently updated', aliases: 'new fresh', keys: ['⌥3'], run: () => setSmartFilter('recent') },
   { id: 'smart-tested', section: 'Filter', title: 'Show end-to-end tested', aliases: 'e2e verified qa proof screenshots recording', keys: ['⌥5'], run: () => setSmartFilter('tested') },
   { id: 'smart-attention', section: 'Filter', title: 'Show PRs that need attention', aliases: 'unapproved conflicts failing blocked red yellow triage', keys: ['⌥4'], run: () => setSmartFilter('attention') },
+  { id: 'paste-order', section: 'Filter', title: 'Sort by a pasted list of PRs (just ⌘V anywhere outside a text box)', aliases: 'paste order ranking priority report clipboard', keys: ['⇧o'], run: () => void navigator.clipboard.readText().then((text) => applyPastedText(text) || toast('No PR numbers found on the clipboard', true), () => toast('Press ⌘V to paste your list', true)) },
+  { id: 'paste-order-clear', section: 'Filter', title: 'Clear pasted order', aliases: 'reset sort pasted', keys: ['⌥⌫'], run: () => { setPastedOrder(null); toast('Back to the normal order'); }, isEnabled: () => pastedOrder != null },
   { id: 'group', section: 'Filter', title: 'Group related work', aliases: 'cluster effort category batch smart group', keys: ['⇧t'], run: toggleGrouping },
   { id: 'regroup', section: 'Filter', title: 'Regroup', aliases: 'refresh groups cluster', keys: [], run: () => { groupsSignature = ''; localStorage.removeItem(GROUPS_CACHE_KEY); void ensureGroups(true); } },
   { id: 'sort', section: 'Filter', title: 'Cycle sort (smart / updated / smallest)', aliases: 'order', keys: ['⇧s'], run: cycleSortOrder },
@@ -2207,6 +2330,13 @@ element('open-help').addEventListener('click', openHelp);
 element('open-github').addEventListener('click', openSelectedOnGitHub);
 element('refresh-button').addEventListener('click', manualRefresh);
 element('open-triage').addEventListener('click', openTriage);
+element('pasted-order').addEventListener('click', (event) => {
+  if ((event.target as HTMLElement).closest('.pasted-clear') != null) {
+    setPastedOrder(null);
+    toast('Back to the normal order');
+  }
+});
+renderPastedChip();
 element('list-empty').addEventListener('click', (event) => {
   const action = (event.target as HTMLElement).closest<HTMLElement>('[data-empty-action]')?.dataset.emptyAction;
   if (action === 'clear-filter') {
