@@ -11,7 +11,7 @@ import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, ne
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
-import { approvePull, commentOnPull, fetchViewerLogin, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchQueue, type MergeState, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
+import { approvePull, commentOnPull, messageDevinSession, fetchViewerLogin, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchQueue, type MergeState, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
 import { DiffView, parseDiff, type DiffStyle, type ParsedFile } from './diffs';
 import { sanitizeHtml } from './sanitize';
 import { CommandRegistry, renderShortcut, type Command } from './commands';
@@ -86,6 +86,7 @@ const dom = {
   commentBody: element<HTMLTextAreaElement>('comment-body'),
   commentHint: element('comment-hint'),
   commentSend: element<HTMLButtonElement>('comment-send'),
+  commentSendLabel: element('comment-send-label'),
   bulkConfirm: element<HTMLDialogElement>('bulk-confirm'),
   triage: element<HTMLDialogElement>('triage'),
   triageTitle: element('triage-title'),
@@ -2294,6 +2295,10 @@ async function syncDevinButton(pull: PullRequest): Promise<void> {
   if (selectedPull()?.id !== pull.id) return;
   button.disabled = url == null;
   button.dataset.tip = url == null ? 'No Devin session linked on this PR' : 'Open Devin session  D';
+  const messageButton = document.getElementById('message-devin') as HTMLButtonElement | null;
+  if (messageButton == null) return;
+  messageButton.disabled = url == null;
+  messageButton.dataset.tip = url == null ? 'No Devin session linked on this PR' : 'Message Devin session  ⇧D';
 }
 
 async function openDevinSession(): Promise<void> {
@@ -2361,35 +2366,69 @@ const themePicker = new ThemePicker({
   cancel: () => applyTheme(),
 });
 
+type CommentMode = { kind: 'github' } | { kind: 'devin'; sessionId: string };
+
 const commentDrafts = new Map<string, string>();
 let commentTarget: PullRequest | null = null;
+let commentMode: CommentMode = { kind: 'github' };
 
-function openCommentDialog(): void {
-  const pull = selectedPull();
-  if (pull == null) return;
+const draftKey = (pull: PullRequest, mode: CommentMode): string => (mode.kind === 'devin' ? `devin:${pull.id}` : pull.id);
+
+function showCommentDialog(pull: PullRequest, mode: CommentMode): void {
   commentTarget = pull;
-  dom.commentTitle.textContent = `Comment on #${pull.number}`;
-  dom.commentHint.textContent = `${pull.repository.nameWithOwner} · ${pull.title}`;
-  dom.commentBody.value = commentDrafts.get(pull.id) ?? '';
+  commentMode = mode;
+  dom.commentDialog.dataset.mode = mode.kind;
+  dom.commentTitle.textContent = mode.kind === 'devin' ? `Message Devin about #${pull.number}` : `Comment on #${pull.number}`;
+  dom.commentHint.textContent = mode.kind === 'devin' ? `Sent straight to the linked Devin session · ${pull.title}` : `${pull.repository.nameWithOwner} · ${pull.title}`;
+  dom.commentBody.placeholder = mode.kind === 'devin' ? 'Tell Devin what to do… (goes to the session, not GitHub)' : 'Leave a comment… (markdown, @mentions work)';
+  dom.commentSendLabel.textContent = mode.kind === 'devin' ? 'Send to Devin' : 'Comment';
+  dom.commentBody.value = commentDrafts.get(draftKey(pull, mode)) ?? '';
   dom.commentSend.disabled = dom.commentBody.value.trim() === '';
   dom.commentDialog.showModal();
   dom.commentBody.focus();
   dom.commentBody.setSelectionRange(dom.commentBody.value.length, dom.commentBody.value.length);
 }
 
+function openCommentDialog(): void {
+  const pull = selectedPull();
+  if (pull != null) showCommentDialog(pull, { kind: 'github' });
+}
+
+function devinSessionId(url: string): string | null {
+  return /\/sessions\/([0-9a-f]{16,64})/i.exec(url)?.[1] ?? null;
+}
+
+async function openDevinMessageDialog(): Promise<void> {
+  const pull = selectedPull();
+  if (pull == null) return;
+  const url = await findDevinSession(pull);
+  const sessionId = url == null ? null : devinSessionId(url);
+  if (sessionId == null) {
+    toast(`No Devin session linked on #${pull.number}`, true);
+    return;
+  }
+  if (selectedPull()?.id === pull.id) showCommentDialog(pull, { kind: 'devin', sessionId });
+}
+
 function closeCommentDialog(): void {
   if (commentTarget != null) {
     const draft = dom.commentBody.value;
-    if (draft.trim() === '') commentDrafts.delete(commentTarget.id);
-    else commentDrafts.set(commentTarget.id, draft);
+    const key = draftKey(commentTarget, commentMode);
+    if (draft.trim() === '') commentDrafts.delete(key);
+    else commentDrafts.set(key, draft);
   }
   dom.commentDialog.close();
 }
 
 async function submitComment(): Promise<void> {
   const pull = commentTarget;
+  const mode = commentMode;
   const body = dom.commentBody.value.trim();
   if (pull == null || body === '' || dom.commentSend.disabled) return;
+  if (mode.kind === 'devin') {
+    sendToDevin(pull, mode.sessionId, body);
+    return;
+  }
   dom.commentSend.disabled = true;
   try {
     await commentOnPull(pull, body);
@@ -2404,6 +2443,27 @@ async function submitComment(): Promise<void> {
     toast(errorMessage(error), true);
     dom.commentSend.disabled = false;
   }
+}
+
+const DEVIN_REPLY_PREVIEW_CHARS = 160;
+
+function sendToDevin(pull: PullRequest, sessionId: string, body: string): void {
+  commentDrafts.delete(draftKey(pull, commentMode));
+  dom.commentBody.value = '';
+  commentTarget = null;
+  dom.commentDialog.close();
+  toast(`Sending to Devin about #${pull.number}…`);
+  void messageDevinSession(sessionId, body).then(
+    (reply) => {
+      const preview = reply.replace(/\s+/g, ' ').trim();
+      const clipped = preview.length > DEVIN_REPLY_PREVIEW_CHARS ? `${preview.slice(0, DEVIN_REPLY_PREVIEW_CHARS)}…` : preview;
+      toast(clipped === '' ? `Sent to Devin about #${pull.number}` : `Sent to Devin · #${pull.number}: ${clipped}`);
+    },
+    (error: unknown) => {
+      commentDrafts.set(`devin:${pull.id}`, body);
+      toast(`Devin message failed (draft kept): ${errorMessage(error)}`, true);
+    },
+  );
 }
 
 dom.commentBody.addEventListener('input', () => (dom.commentSend.disabled = dom.commentBody.value.trim() === ''));
@@ -2429,6 +2489,7 @@ element('comment-cancel').addEventListener('click', closeCommentDialog);
 element('comment-button').addEventListener('click', openCommentDialog);
 element('threads-button').addEventListener('click', focusFirstOpenThread);
 element('open-devin').addEventListener('click', () => void openDevinSession());
+element('message-devin').addEventListener('click', () => void openDevinMessageDialog());
 element('open-preview').addEventListener('click', () => void openPreview());
 
 function openThemePicker(): void {
@@ -2515,6 +2576,7 @@ const COMMANDS: Command[] = [
   { id: 'media', section: 'Navigate', title: 'Open first image / video / HTML preview', aliases: 'lightbox screenshot media picture gif recording', keys: ['i', '⌘⇧i'], run: () => openMedia(0), isEnabled: hasPull },
   { id: 'description', section: 'Navigate', title: 'Jump to description', keys: ['⌘↑'], run: () => diffView.scrollToTop(), isEnabled: hasPull },
   { id: 'devin', section: 'Pull request', title: 'Open Devin session', aliases: 'devin agent session link', keys: ['d'], run: () => void openDevinSession(), isEnabled: hasPull },
+  { id: 'message-devin', section: 'Pull request', title: 'Message Devin session', aliases: 'devin agent session send tell ask chat', keys: ['⇧d'], run: () => void openDevinMessageDialog(), isEnabled: hasPull },
 
   ...VIM_COMMANDS,
   ...DIFF_SCROLL_COMMANDS,

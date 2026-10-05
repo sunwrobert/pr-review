@@ -251,6 +251,45 @@ async fn comment(repo: String, number: u64, body: String) -> Result<String, Stri
     gh(&["api", &path, "-X", "POST", "-f", &format!("body={body}"), "--jq", ".html_url"]).await.map(|url| url.trim().to_string())
 }
 
+const DEVIN_TIMEOUT_SECS: u64 = 600;
+
+fn devin_binary() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    [format!("{home}/.local/bin/devin"), "/opt/homebrew/bin/devin".to_string(), "/usr/local/bin/devin".to_string()]
+        .into_iter()
+        .find(|candidate| Path::new(candidate).exists())
+        .unwrap_or_else(|| "devin".to_string())
+}
+
+#[tauri::command]
+async fn message_devin(session_id: String, message: String) -> Result<String, String> {
+    let is_valid_session = (16..=64).contains(&session_id.len()) && session_id.chars().all(|character| character.is_ascii_hexdigit());
+    if !is_valid_session {
+        return Err("invalid Devin session id".to_string());
+    }
+    if message.trim().is_empty() || message.len() > MAX_COMMENT_BYTES {
+        return Err("message must be between 1 and 65000 bytes".to_string());
+    }
+    let workdir = std::env::temp_dir().join("pr-review-devin");
+    std::fs::create_dir_all(&workdir).map_err(|error| error.to_string())?;
+    let child = Command::new(devin_binary())
+        .args(["--cloud", "-r", &session_id, "--respect-workspace-trust", "false", "-p", &message])
+        .current_dir(&workdir)
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(DEVIN_TIMEOUT_SECS), child)
+        .await
+        .map_err(|_| "sent, but Devin is still working; check the session".to_string())?
+        .map_err(|error| format!("could not run devin: {error}"))?;
+    if output.status.success() {
+        return String::from_utf8(output.stdout).map(|reply| reply.trim().to_string()).map_err(|error| error.to_string());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if stderr.is_empty() { format!("devin exited with {}", output.status) } else { stderr })
+}
+
 #[tauri::command]
 async fn viewer() -> Result<String, String> {
     gh(&["api", "user", "--jq", ".login"]).await.map(|login| login.trim().to_string())
@@ -399,7 +438,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, viewer, comment, threads, set_thread_resolved, reply_to_thread, merge_queue, merge_states, conversation, body, diff, approve, merge, open_in_browser, review_context, readiness_available, readiness])
+        .invoke_handler(tauri::generate_handler![queue, viewer, comment, message_devin, threads, set_thread_resolved, reply_to_thread, merge_queue, merge_states, conversation, body, diff, approve, merge, open_in_browser, review_context, readiness_available, readiness])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }

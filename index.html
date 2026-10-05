@@ -72,6 +72,7 @@
               <button id="merge" class="primary merge-icon" title="Squash and merge  ⌘↵"></button>
               <button class="ghost icon-action" id="open-preview" title="Open preview deployment  P" disabled><i data-icon="preview"></i><kbd class="icon-kbd">P</kbd></button>
               <button class="ghost icon-action" id="open-devin" title="Open Devin session  D" disabled><svg class="devin-logo" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M5.9 1.6 8.3 3v2.8L5.9 7.2 3.5 5.8V3zM11.1 4.6l2.4 1.4v2.8l-2.4 1.4-2.4-1.4V6zM5.9 8.8l2.4 1.4V13l-2.4 1.4L3.5 13v-2.8z"/><path d="M8.2 5.7 8.9 6.2M8.2 10.3 8.9 9.8" stroke="currentColor" stroke-width="1.2"/></svg><kbd class="icon-kbd">D</kbd></button>
+              <button class="ghost icon-action" id="message-devin" title="Message Devin session  ⇧D" disabled><i data-icon="send"></i><kbd class="icon-kbd">⇧</kbd><kbd class="icon-kbd">D</kbd></button>
               <button class="ghost icon-action" id="open-github" title="Open on GitHub  O"><i data-icon="github"></i><kbd>O</kbd></button>
             </div>
           </header>
@@ -106,7 +107,7 @@
         <div class="comment-hint muted" id="comment-hint"></div>
         <menu>
           <button value="cancel" class="ghost" type="button" id="comment-cancel">Cancel <kbd>esc</kbd></button>
-          <button value="send" class="primary" type="button" id="comment-send">Comment <kbd>⌘</kbd><kbd>↵</kbd></button>
+          <button value="send" class="primary" type="button" id="comment-send"><span id="comment-send-label">Comment</span> <kbd>⌘</kbd><kbd>↵</kbd></button>
         </menu>
       </form>
     </dialog>
