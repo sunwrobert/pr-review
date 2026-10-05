@@ -416,7 +416,7 @@ img { -webkit-user-drag: none; }
 #open-github { gap: 0; }
 #open-github svg { color: var(--text-2); }
 
-#tooltip { position: fixed; top: 0; left: 0; z-index: 200; display: inline-flex; align-items: center; gap: 8px; max-width: 320px; padding: 5px 8px; border-radius: 6px; background: #2a2b2f; border: 1px solid #36383e; color: #f1f2f4; font-size: 12px; line-height: 1.35; pointer-events: none; opacity: 0; transition: opacity .1s; box-shadow: 0 6px 20px rgb(0 0 0 / .35); white-space: nowrap; }
+#tooltip { position: fixed; inset: auto; top: 0; left: 0; margin: 0; overflow: visible; z-index: 200; display: inline-flex; align-items: center; gap: 8px; max-width: 320px; padding: 5px 8px; border-radius: 6px; background: #2a2b2f; border: 1px solid #36383e; color: #f1f2f4; font-size: 12px; line-height: 1.35; pointer-events: none; opacity: 0; transition: opacity .1s; box-shadow: 0 6px 20px rgb(0 0 0 / .35); white-space: nowrap; }
 #tooltip.show { opacity: 1; }
 #tooltip .tip-keys { display: inline-flex; gap: 2px; align-items: center; }
 #tooltip kbd { margin: 0; background: rgb(255 255 255 / .1); border-color: rgb(255 255 255 / .14); color: #e3e5e8; }

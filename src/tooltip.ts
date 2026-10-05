@@ -23,9 +23,15 @@ export function enableTooltips(): void {
   const tip = document.createElement('div');
   tip.id = 'tooltip';
   tip.setAttribute('role', 'tooltip');
+  tip.popover = 'manual';
   document.body.append(tip);
   let timer = 0;
   let current: HTMLElement | null = null;
+
+  const raiseAboveDialogs = (): void => {
+    if (tip.matches(':popover-open')) tip.hidePopover();
+    tip.showPopover();
+  };
 
   const hide = (): void => {
     window.clearTimeout(timer);
@@ -38,6 +44,7 @@ export function enableTooltips(): void {
     if (text === '') return;
     tip.innerHTML = renderLabel(text);
     tip.classList.remove('show');
+    raiseAboveDialogs();
     tip.style.transition = 'none';
     const rect = target.getBoundingClientRect();
     const width = tip.offsetWidth;
