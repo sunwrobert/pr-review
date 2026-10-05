@@ -26,6 +26,9 @@ export interface PullRequest {
   checkState: CheckState | null;
   queueEntry: { position: number; state: string } | null;
   openThreads?: number;
+  /** Names of required checks that failed; undefined until merge states load. */
+  failingRequired?: string[];
+  failingOptional?: number;
 }
 
 export interface MergeState {
@@ -33,6 +36,17 @@ export interface MergeState {
   mergeable: MergeableState;
   mergeStateStatus: string;
   openThreads: number;
+  failingRequired: string[];
+  failingOptional: number;
+}
+
+interface RawCheck {
+  __typename: 'CheckRun' | 'StatusContext';
+  name?: string;
+  context?: string;
+  conclusion?: string | null;
+  state?: string;
+  isRequired?: boolean;
 }
 
 interface RawMergeState {
@@ -40,6 +54,21 @@ interface RawMergeState {
   mergeable: MergeableState;
   mergeStateStatus: string;
   reviewThreads?: { nodes: { isResolved: boolean; isOutdated: boolean }[] };
+  commits?: { nodes: { commit: { statusCheckRollup: { contexts: { nodes: (RawCheck | null)[] } } | null } }[] };
+}
+
+const FAILED_CHECK = new Set(['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STARTUP_FAILURE']);
+
+function toMergeState({ reviewThreads, commits, ...rest }: RawMergeState): MergeState {
+  const checks = (commits?.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? []).filter((check): check is RawCheck => check != null);
+  const failed = checks.filter((check) => FAILED_CHECK.has(check.conclusion ?? check.state ?? ''));
+  const required = failed.filter((check) => check.isRequired === true);
+  return {
+    ...rest,
+    openThreads: (reviewThreads?.nodes ?? []).filter((thread) => !thread.isResolved).length,
+    failingRequired: required.map((check) => check.name ?? check.context ?? 'check'),
+    failingOptional: failed.length - required.length,
+  };
 }
 
 interface RawPullRequest extends Omit<PullRequest, 'checkState' | 'mergeable' | 'mergeStateStatus' | 'queueEntry'> {
@@ -63,7 +92,7 @@ function toPullRequest({ commits, mergeQueueEntry, ...pull }: RawPullRequest): P
 const MERGE_STATE_BATCH = 20;
 
 interface MergeStateResponse {
-  data?: { nodes: (RawMergeState | null)[] };
+  data?: Record<string, RawMergeState | null>;
   errors?: { message: string }[];
 }
 
@@ -73,7 +102,7 @@ export async function fetchMergeStates(ids: readonly string[], onBatch: (states:
     batches.map(async (batch) => {
       const response: MergeStateResponse = JSON.parse(await invoke<string>('merge_states', { ids: batch }));
       if (response.data == null) throw new Error(response.errors?.map((error) => error.message).join('; ') ?? 'Empty response');
-      onBatch(response.data.nodes.filter((node): node is RawMergeState => node?.id != null).map(({ reviewThreads, ...rest }) => ({ ...rest, openThreads: (reviewThreads?.nodes ?? []).filter((thread) => !thread.isResolved).length })));
+      onBatch(Object.values(response.data).filter((node): node is RawMergeState => node?.id != null).map(toMergeState));
     }),
   );
   const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');

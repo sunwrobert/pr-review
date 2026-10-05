@@ -17,6 +17,7 @@ export function hoursSinceUpdate(pull: PullRequest, now: number): number {
 }
 
 export function isGreen(pull: PullRequest): boolean {
+  if (pull.failingRequired != null && pull.checkState !== 'PENDING' && pull.checkState !== 'EXPECTED') return pull.failingRequired.length === 0;
   return pull.checkState === 'SUCCESS';
 }
 
@@ -80,7 +81,7 @@ const AI_SCORE_WEIGHT = 1_200;
 
 export function smartScore(pull: PullRequest, now: number, aiScore: AiScoreLookup): number {
   const ai = aiScore(pull);
-  const blockedPenalty = pull.isDraft || pull.mergeable === 'CONFLICTING' || pull.checkState === 'FAILURE' || pull.checkState === 'ERROR' ? 800 : 0;
+  const blockedPenalty = pull.isDraft || pull.mergeable === 'CONFLICTING' || (pull.failingRequired != null ? pull.failingRequired.length > 0 : pull.checkState === 'FAILURE' || pull.checkState === 'ERROR') ? 800 : 0;
   if (ai == null) return readinessScore(pull, now);
   return ai * AI_SCORE_WEIGHT + (isGreen(pull) ? 150 : 0) + (isMergeable(pull) ? 100 : 0) - Math.min(100, hoursSinceUpdate(pull, now) * 0.5) - blockedPenalty;
 }

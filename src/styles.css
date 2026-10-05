@@ -710,8 +710,8 @@ button.primary, #pr-head .actions button { transition: background-color .12s lin
 @keyframes flash-ring { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); } 100% { box-shadow: 0 0 0 6px transparent; } }
 .search.flash { animation: flash-ring .5s var(--ease-out); border-color: var(--accent); }
 
-#tooltip { transition: opacity .1s linear, transform .12s var(--ease-out); transform: translate3d(var(--tip-x, 0), calc(var(--tip-y, 0) + 3px), 0); }
-#tooltip.show { transform: translate3d(var(--tip-x, 0), var(--tip-y, 0), 0); }
+#tooltip { transition: opacity .1s linear, transform .12s var(--ease-out); transform: scale(.94); }
+#tooltip.show { transform: none; }
 
 @keyframes caret-settle { from { opacity: .4; } to { opacity: 1; } }
 #pr-list li.group-row .caret { transition: transform .16s var(--ease-out); }
@@ -919,3 +919,7 @@ kbd[data-glyph='backspace'] { --kbd-glyph: url("data:image/svg+xml,%3Csvg%20xmln
 .thread-reply textarea:focus { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
 .thread-reply-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
 .thread.flash { animation: flash-ring .5s var(--ease-out); }
+.threads-button { position: relative; }
+.threads-badge { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; margin-left: -2px; border-radius: 999px; font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--bg); background: var(--wait); }
+.threads-badge[hidden] { display: none; }
+#pr-head .actions .threads-button:has(.threads-badge:not([hidden])) svg { color: var(--wait); }

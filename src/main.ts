@@ -389,6 +389,10 @@ function statusIcon(pull: PullRequest): string {
 }
 
 function checksIcon(pull: PullRequest): string {
+  if (pull.failingRequired != null && (pull.checkState === 'FAILURE' || pull.checkState === 'ERROR')) {
+    if (pull.failingRequired.length > 0) return `<span class="check bad" title="Required checks failing: ${escapeHtml(pull.failingRequired.join(', '))}">${icon('x')}</span>`;
+    return `<span class="check ok" title="Required checks passed${pull.failingOptional != null && pull.failingOptional > 0 ? ` · ${pull.failingOptional} optional failed` : ''}">${icon('check')}</span>`;
+  }
   switch (pull.checkState) {
     case 'SUCCESS':
       return `<span class="check ok" title="Checks passed">${icon('check')}</span>`;
@@ -699,6 +703,9 @@ function reviewLabel(pull: PullRequest): { label: string; tone: string } {
 }
 
 function checksLabel(pull: PullRequest): { label: string; tone: string } {
+  if (pull.failingRequired != null && (pull.checkState === 'FAILURE' || pull.checkState === 'ERROR')) {
+    return pull.failingRequired.length > 0 ? { label: `Required failing (${pull.failingRequired.join(', ')})`, tone: 'bad' } : { label: 'Required passing', tone: 'ok' };
+  }
   switch (pull.checkState) {
     case 'SUCCESS':
       return { label: 'Passing', tone: 'ok' };
@@ -781,8 +788,19 @@ function threadHtml(thread: ReviewThread): string {
   </article>`;
 }
 
+function syncThreadsButton(open: number | null): void {
+  const button = document.getElementById('threads-button') as HTMLButtonElement | null;
+  const badge = button?.querySelector<HTMLElement>('.threads-badge');
+  if (button == null || badge == null) return;
+  button.disabled = open == null || open === 0 && currentThreads.length === 0;
+  badge.hidden = open == null || open === 0;
+  badge.textContent = String(open ?? 0);
+  button.dataset.tip = open == null ? 'Loading review threads…' : open === 0 ? (currentThreads.length === 0 ? 'No review threads on this PR' : 'All review threads resolved  ⇧C') : `${open} open review thread${open === 1 ? '' : 's'}  ⇧C`;
+}
+
 function renderThreads(section: HTMLElement, threads: ReviewThread[]): void {
   currentThreads = threads;
+  syncThreadsButton(threads.filter((thread) => !thread.isResolved).length);
   const open = threads.filter((thread) => !thread.isResolved);
   const resolved = threads.length - open.length;
   section.hidden = threads.length === 0;
@@ -869,9 +887,9 @@ function jumpToThread(threadId: string): void {
 
 function focusFirstOpenThread(): void {
   const section = dom.descPane.querySelector<HTMLElement>('[data-threads]');
-  const first = section?.querySelector<HTMLElement>('.thread:not(.is-resolved)');
+  const first = section?.querySelector<HTMLElement>('.thread:not(.is-resolved)') ?? (currentThreads.length > 0 ? section?.querySelector<HTMLElement>('.conversation-head') : null);
   if (section == null || first == null) {
-    toast('No open threads on this PR');
+    toast('No review threads on this PR');
     return;
   }
   glideScrollTo(dom.descPane, dom.descPane.scrollTop + first.getBoundingClientRect().top - dom.descPane.getBoundingClientRect().top - 12);
@@ -1090,6 +1108,8 @@ function syncQueueState(pull: PullRequest): void {
 
 function renderDetail(pull: PullRequest): void {
   syncQueueState(pull);
+  currentThreads = [];
+  syncThreadsButton(null);
   void syncDevinButton(pull);
   void syncPreviewButton(pull);
   dom.crumbs.innerHTML = `<span class="repo" title="${escapeHtml(pull.repository.nameWithOwner)}">${escapeHtml(repoName(pull))}</span><span class="sep">›</span><a class="cur pr-link" href="${escapeHtml(pull.url)}" title="Open on GitHub  O">#${pull.number}</a>`;
@@ -1445,7 +1465,7 @@ function applyMergeStates(kind: QueueKind, states: MergeState[]): void {
     const mergeState = byId.get(pull.id);
     if (mergeState == null) return pull;
     if (mergeState.mergeStateStatus !== 'UNKNOWN') mergeStateCache.set(pull.id, { updatedAt: pull.updatedAt, state: mergeState });
-    return { ...pull, mergeable: mergeState.mergeable, mergeStateStatus: mergeState.mergeStateStatus, openThreads: mergeState.openThreads };
+    return { ...pull, mergeable: mergeState.mergeable, mergeStateStatus: mergeState.mergeStateStatus, openThreads: mergeState.openThreads, failingRequired: mergeState.failingRequired, failingOptional: mergeState.failingOptional };
   });
   queueCache.set(kind, updated);
   if (kind !== state.kind) return;
@@ -2407,6 +2427,7 @@ dom.commentDialog.addEventListener('cancel', (event) => {
 dom.commentSend.addEventListener('click', () => void submitComment());
 element('comment-cancel').addEventListener('click', closeCommentDialog);
 element('comment-button').addEventListener('click', openCommentDialog);
+element('threads-button').addEventListener('click', focusFirstOpenThread);
 element('open-devin').addEventListener('click', () => void openDevinSession());
 element('open-preview').addEventListener('click', () => void openPreview());
 

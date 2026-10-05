@@ -113,14 +113,12 @@ async fn merge_states(ids: Vec<String>) -> Result<String, String> {
     if ids.is_empty() || ids.len() > MAX_MERGE_STATE_IDS || !ids.iter().all(|id| is_node_id(id)) {
         return Err("invalid pull request ids".to_string());
     }
-    let query = "query($ids: [ID!]!) { nodes(ids: $ids) { ... on PullRequest { id mergeable mergeStateStatus reviewThreads(first: 100) { nodes { isResolved isOutdated } } } } }";
-    let mut args: Vec<String> = vec!["api".into(), "graphql".into(), "-f".into(), format!("query={query}")];
-    for id in &ids {
-        args.push("-f".into());
-        args.push(format!("ids[]={id}"));
-    }
-    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-    gh(&borrowed).await
+    // isRequired needs the PR id as an argument, so each PR gets its own aliased field.
+    let fields: Vec<String> = ids.iter().enumerate().map(|(index, id)| format!(
+        "p{index}: node(id: \"{id}\") {{ ... on PullRequest {{ id mergeable mergeStateStatus reviewThreads(first: 100) {{ nodes {{ isResolved isOutdated }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100) {{ nodes {{ __typename ... on CheckRun {{ name conclusion isRequired(pullRequestId: \"{id}\") }} ... on StatusContext {{ context state isRequired(pullRequestId: \"{id}\") }} }} }} }} }} }} }} }} }}"
+    )).collect();
+    let query = format!("query {{ {} }}", fields.join(" "));
+    gh(&["api", "graphql", "-f", &format!("query={query}")]).await
 }
 
 #[tauri::command]

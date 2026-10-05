@@ -37,14 +37,21 @@ export function enableTooltips(): void {
     const text = target.dataset.tip ?? '';
     if (text === '') return;
     tip.innerHTML = renderLabel(text);
-    tip.classList.add('show');
+    tip.classList.remove('show');
+    tip.style.transition = 'none';
     const rect = target.getBoundingClientRect();
     const tipRect = tip.getBoundingClientRect();
     const below = rect.bottom + 8 + tipRect.height < window.innerHeight;
     const top = below ? rect.bottom + 8 : rect.top - tipRect.height - 8;
     const left = Math.min(window.innerWidth - tipRect.width - 8, Math.max(8, rect.left + rect.width / 2 - tipRect.width / 2));
-    tip.style.setProperty('--tip-x', `${Math.round(left)}px`);
-    tip.style.setProperty('--tip-y', `${Math.round(top)}px`);
+    const originX = Math.max(8, Math.min(tipRect.width - 8, rect.left + rect.width / 2 - left));
+    tip.style.left = `${Math.round(left)}px`;
+    tip.style.top = `${Math.round(top)}px`;
+    tip.style.transformOrigin = `${Math.round(originX)}px ${below ? '0' : '100%'}`;
+    tip.dataset.side = below ? 'below' : 'above';
+    void tip.offsetWidth;
+    tip.style.transition = '';
+    tip.classList.add('show');
   };
 
   const adopt = (element: HTMLElement): void => {

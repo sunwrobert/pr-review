@@ -17,7 +17,9 @@ export function isConflicted(pull: PullRequest): boolean {
   return pull.mergeable === 'CONFLICTING' || pull.mergeStateStatus === 'DIRTY';
 }
 
+/** A failing check only counts when GitHub marks it required; before merge states load, fall back to the rollup. */
 export function isFailing(pull: PullRequest): boolean {
+  if (pull.failingRequired != null) return pull.failingRequired.length > 0;
   return pull.checkState === 'FAILURE' || pull.checkState === 'ERROR';
 }
 
