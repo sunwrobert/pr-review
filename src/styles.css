@@ -561,9 +561,12 @@ button, .chip, .file, #pr-list li { touch-action: manipulation; }
 .triage-section.tone-wait .triage-dot { background: var(--wait); }
 .triage-count { color: var(--text-3); font-weight: 500; font-variant-numeric: tabular-nums; }
 .triage-section .bulk-list { margin: 6px 0 0; max-height: 200px; }
-.triage-section .bulk-list li { grid-template-columns: 16px auto 1fr auto; }
+.triage-section .bulk-list li { display: block; padding: 0; }
+.triage-row { display: grid; grid-template-columns: 14px 16px auto 1fr auto; gap: 10px; align-items: center; height: 34px; padding: 0 12px; cursor: pointer; transition: opacity .12s, background-color .12s; }
+.triage-row:hover { background: var(--bg-hover); }
+.triage-row input { margin: 0; accent-color: var(--text-2); }
+.triage-row:has(input:not(:checked)) { opacity: .4; }
 .triage-section .age { color: var(--text-4); font-size: 11.5px; }
-.triage-section:has(input:not(:checked)) .bulk-list { opacity: .4; }
 
 ::selection { background: color-mix(in srgb, var(--accent) 35%, transparent); }
 ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--text-4) 45%, transparent); background-clip: content-box; }

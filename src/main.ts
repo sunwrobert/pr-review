@@ -2199,25 +2199,42 @@ function isTested(pull: PullRequest): boolean {
 }
 
 let triagePulls: PullRequest[] = [];
+const triageExcluded = new Set<string>();
 
 function triageIncluded(): Set<AttentionReason> {
-  return new Set(ATTENTION_ORDER.filter((reason) => dom.triage.querySelector<HTMLInputElement>(`input[data-reason="${reason}"]`)?.checked ?? true));
+  return new Set(ATTENTION_ORDER.filter((reason) => triagePulls.some((pull) => !triageExcluded.has(pull.id) && attentionReasons(pull).includes(reason))));
 }
 
-function triageTargets(included: ReadonlySet<AttentionReason>): PullRequest[] {
-  return triagePulls.filter((pull) => attentionReasons(pull).some((reason) => included.has(reason)));
+function triageTargets(): PullRequest[] {
+  return triagePulls.filter((pull) => !triageExcluded.has(pull.id));
 }
 
 function renderTriageSummary(): void {
-  const count = triageTargets(triageIncluded()).length;
+  const count = triageTargets().length;
+  const plural = count === 1 ? '' : 's';
   dom.triageCopy.disabled = count === 0;
-  dom.triageCopy.firstChild!.textContent = `Copy prompt for ${count} PR${count === 1 ? '' : 's'} `;
+  dom.triageCopy.firstChild!.textContent = `Copy prompt for ${count} PR${plural} `;
   dom.triageDevin.disabled = count === 0;
+  element('triage-devin-label').textContent = `Send to ${count} Devin session${plural}`;
+  dom.triage.querySelectorAll<HTMLInputElement>('input[data-pull]').forEach((input) => (input.checked = !triageExcluded.has(input.dataset.pull ?? '')));
+  dom.triage.querySelectorAll<HTMLInputElement>('input[data-reason]').forEach((input) => {
+    const ids = triagePulls.filter((pull) => attentionReasons(pull).includes(input.dataset.reason as AttentionReason)).map((pull) => pull.id);
+    const picked = ids.filter((id) => !triageExcluded.has(id)).length;
+    input.checked = picked === ids.length;
+    input.indeterminate = picked > 0 && picked < ids.length;
+    input.closest('.triage-section')?.querySelector('.triage-count')?.replaceChildren(picked === ids.length ? `${ids.length}` : `${picked}/${ids.length}`);
+  });
+}
+
+function setTriagePicked(ids: readonly string[], isPicked: boolean): void {
+  ids.forEach((id) => (isPicked ? triageExcluded.delete(id) : triageExcluded.add(id)));
+  renderTriageSummary();
 }
 
 function openTriage(): void {
   const scope = state.checkedIds.size > 0 ? checkedPulls() : state.pulls;
   triagePulls = scope.filter(needsAttention);
+  triageExcluded.clear();
   if (triagePulls.length === 0) {
     toast(state.checkedIds.size > 0 ? 'Nothing in the selection needs attention' : 'Every PR is approved, green and conflict-free');
     return;
@@ -2227,7 +2244,7 @@ function openTriage(): void {
     const pulls = triagePulls.filter((pull) => attentionReasons(pull).includes(reason));
     if (pulls.length === 0) return '';
     const meta = ATTENTION_META[reason];
-    const rows = pulls.map((pull) => `<li>${statusIcon(pull)}<span class="id">#${pull.number}</span><span class="t">${escapeHtml(pull.title)}</span><span class="age">${relativeTime(pull.updatedAt)}</span></li>`).join('');
+    const rows = pulls.map((pull) => `<li><label class="triage-row"><input type="checkbox" data-pull="${escapeHtml(pull.id)}" checked />${statusIcon(pull)}<span class="id">#${pull.number}</span><span class="t">${escapeHtml(pull.title)}</span><span class="age">${relativeTime(pull.updatedAt)}</span></label></li>`).join('');
     return `<section class="triage-section tone-${meta.tone}"><label class="triage-head"><input type="checkbox" data-reason="${reason}" checked /><i class="triage-dot"></i><span>${meta.title}</span><span class="triage-count">${pulls.length}</span></label><ol class="bulk-list">${rows}</ol></section>`;
   }).join('');
   renderTriageSummary();
@@ -2236,8 +2253,17 @@ function openTriage(): void {
   dom.triageCopy.focus();
 }
 
-dom.triage.addEventListener('change', renderTriageSummary);
+dom.triage.addEventListener('change', (event) => {
+  const input = event.target as HTMLInputElement;
+  if (input.dataset.pull != null) setTriagePicked([input.dataset.pull], input.checked);
+  else if (input.dataset.reason != null) setTriagePicked(triagePulls.filter((pull) => attentionReasons(pull).includes(input.dataset.reason as AttentionReason)).map((pull) => pull.id), input.checked);
+});
 dom.triage.addEventListener('keydown', (event) => {
+  if (event.key.toLowerCase() === 'a' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+    event.preventDefault();
+    setTriagePicked(triagePulls.map((pull) => pull.id), triageExcluded.size > 0);
+    return;
+  }
   if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey) || dom.triageDevin.disabled) return;
   event.preventDefault();
   event.stopPropagation();
@@ -2245,7 +2271,7 @@ dom.triage.addEventListener('keydown', (event) => {
 });
 dom.triage.addEventListener('close', () => {
   const included = triageIncluded();
-  const targets = triageTargets(included);
+  const targets = triageTargets();
   if (targets.length === 0) return;
   if (dom.triage.returnValue === 'devin') {
     void sendTriageToDevin(targets);
