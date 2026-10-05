@@ -21,12 +21,13 @@ describe('status invariants', () => {
     );
   });
 
-  test('every pull gets exactly one status, and red is exactly the blocking conditions', () => {
+  test('every pull gets exactly one status, red is exactly the blocking conditions, and conflicts stay red in the queue', () => {
     fc.assert(
       fc.property(pullArbitrary, (pull) => {
         const { tone } = prStatus(pull);
         const isBlocking = isConflicted(pull) || isFailing(pull) || pull.reviewDecision === 'CHANGES_REQUESTED' || (pull.reviewDecision === 'APPROVED' && pull.mergeStateStatus === 'BLOCKED');
-        if (pull.queueEntry != null) expect(tone).toBe('queued');
+        if (isConflicted(pull)) expect(tone).toBe('blocked');
+        else if (pull.queueEntry != null) expect(tone).toBe('queued');
         else expect(tone === 'blocked').toBe(isBlocking);
         if (tone === 'approved') expect(pull.reviewDecision).toBe('APPROVED');
         if (tone === 'pending') expect(pull.reviewDecision === 'APPROVED').toBe(false);

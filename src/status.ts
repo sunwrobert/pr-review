@@ -24,8 +24,8 @@ export function isFailing(pull: PullRequest): boolean {
 }
 
 export function prStatus(pull: PullRequest): { tone: StatusTone; label: string } {
-  if (pull.queueEntry != null) return { tone: 'queued', label: 'In merge queue' };
   if (isConflicted(pull)) return { tone: 'blocked', label: 'Conflicts' };
+  if (pull.queueEntry != null) return { tone: 'queued', label: 'In merge queue' };
   if (pull.reviewDecision === 'CHANGES_REQUESTED') return { tone: 'blocked', label: 'Changes requested' };
   if (isFailing(pull)) return { tone: 'blocked', label: 'Checks failing' };
   if (pull.reviewDecision === 'APPROVED' && pull.mergeStateStatus === 'BLOCKED') return { tone: 'blocked', label: 'Blocked' };

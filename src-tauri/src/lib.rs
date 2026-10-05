@@ -251,14 +251,56 @@ async fn comment(repo: String, number: u64, body: String) -> Result<String, Stri
     gh(&["api", &path, "-X", "POST", "-f", &format!("body={body}"), "--jq", ".html_url"]).await.map(|url| url.trim().to_string())
 }
 
-const DEVIN_TIMEOUT_SECS: u64 = 600;
-
 fn devin_binary() -> String {
     let home = std::env::var("HOME").unwrap_or_default();
     [format!("{home}/.local/bin/devin"), "/opt/homebrew/bin/devin".to_string(), "/usr/local/bin/devin".to_string()]
         .into_iter()
         .find(|candidate| Path::new(candidate).exists())
         .unwrap_or_else(|| "devin".to_string())
+}
+
+const DEVIN_LOAD_TIMEOUT_SECS: u64 = 60;
+const DEVIN_DELIVERY_TIMEOUT_SECS: u64 = 30;
+
+async fn acp_send(stdin: &mut tokio::process::ChildStdin, id: u64, method: &str, params: serde_json::Value) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let line = serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string() + "\n";
+    stdin.write_all(line.as_bytes()).await.map_err(|error| format!("devin acp write failed: {error}"))?;
+    stdin.flush().await.map_err(|error| format!("devin acp write failed: {error}"))
+}
+
+async fn acp_await_delivery(lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>, prompt_id: u64, text: &str) -> Result<(), String> {
+    let needle: String = text.chars().take(80).collect();
+    while let Some(line) = lines.next_line().await.map_err(|error| error.to_string())? {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        if message.get("id").and_then(serde_json::Value::as_u64) == Some(prompt_id) {
+            if let Some(error) = message.get("error") {
+                return Err(error.get("message").and_then(serde_json::Value::as_str).unwrap_or("unknown error").to_string());
+            }
+            return Ok(());
+        }
+        let update = &message["params"]["update"];
+        let is_echo = update["sessionUpdate"] == "user_message_chunk" && update["content"]["text"].as_str().is_some_and(|echoed| echoed.contains(needle.as_str()));
+        if is_echo {
+            return Ok(());
+        }
+    }
+    Err("devin acp closed before confirming delivery".to_string())
+}
+
+async fn acp_await_response(lines: &mut tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>, id: u64) -> Result<serde_json::Value, String> {
+    while let Some(line) = lines.next_line().await.map_err(|error| error.to_string())? {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        if message.get("id").and_then(serde_json::Value::as_u64) != Some(id) {
+            continue;
+        }
+        if let Some(error) = message.get("error") {
+            let text = error.get("message").and_then(serde_json::Value::as_str).unwrap_or("unknown error");
+            return Err(text.to_string());
+        }
+        return Ok(message.get("result").cloned().unwrap_or(serde_json::Value::Null));
+    }
+    Err("devin acp closed the connection".to_string())
 }
 
 #[tauri::command]
@@ -272,22 +314,39 @@ async fn message_devin(session_id: String, message: String) -> Result<String, St
     }
     let workdir = std::env::temp_dir().join("pr-review-devin");
     std::fs::create_dir_all(&workdir).map_err(|error| error.to_string())?;
-    let child = Command::new(devin_binary())
-        .args(["--cloud", "-r", &session_id, "--respect-workspace-trust", "false", "-p", &message])
+    let workdir_text = workdir.to_string_lossy().to_string();
+    let mut child = Command::new(devin_binary())
+        .args(["acp", "--cloud"])
         .current_dir(&workdir)
-        .env("NO_COLOR", "1")
-        .stdin(std::process::Stdio::null())
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
-        .output();
-    let output = tokio::time::timeout(std::time::Duration::from_secs(DEVIN_TIMEOUT_SECS), child)
-        .await
-        .map_err(|_| "sent, but Devin is still working; check the session".to_string())?
+        .spawn()
         .map_err(|error| format!("could not run devin: {error}"))?;
-    if output.status.success() {
-        return String::from_utf8(output.stdout).map(|reply| reply.trim().to_string()).map_err(|error| error.to_string());
+    let mut stdin = child.stdin.take().ok_or("devin acp has no stdin")?;
+    let stdout = child.stdout.take().ok_or("devin acp has no stdout")?;
+    let mut lines = tokio::io::AsyncBufReadExt::lines(tokio::io::BufReader::new(stdout));
+    let acp_session = format!("devin-{}", session_id.to_ascii_lowercase());
+    let handshake = async {
+        acp_send(&mut stdin, 1, "initialize", serde_json::json!({ "protocolVersion": 1, "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false }, "clientInfo": { "name": "pr-review", "version": env!("CARGO_PKG_VERSION") } })).await?;
+        acp_await_response(&mut lines, 1).await.map_err(|error| format!("Devin sign-in failed ({error}); run `devin auth login`"))?;
+        acp_send(&mut stdin, 2, "session/load", serde_json::json!({ "sessionId": acp_session, "cwd": workdir_text, "mcpServers": [] })).await?;
+        acp_await_response(&mut lines, 2).await.map_err(|error| format!("Devin couldn't open session {session_id}: {error}"))?;
+        acp_send(&mut stdin, 3, "session/prompt", serde_json::json!({ "sessionId": acp_session, "prompt": [{ "type": "text", "text": message }] })).await
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(DEVIN_LOAD_TIMEOUT_SECS), handshake)
+        .await
+        .map_err(|_| format!("timed out after {DEVIN_LOAD_TIMEOUT_SECS}s reaching Devin"))??;
+    let delivery = tokio::time::timeout(std::time::Duration::from_secs(DEVIN_DELIVERY_TIMEOUT_SECS), acp_await_delivery(&mut lines, 3, message.trim())).await;
+    drop(stdin);
+    let _ = child.kill().await;
+    match delivery {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => return Err(format!("Devin rejected the message: {error}")),
+        Err(_) => return Err(format!("sent, but Devin didn't confirm within {DEVIN_DELIVERY_TIMEOUT_SECS}s; check the session")),
     }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Err(if stderr.is_empty() { format!("devin exited with {}", output.status) } else { stderr })
+    Ok("delivered".to_string())
 }
 
 #[tauri::command]
@@ -442,3 +501,4 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }
+

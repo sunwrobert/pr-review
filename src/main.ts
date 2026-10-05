@@ -7,7 +7,7 @@ import { findInDiff, findInDom, type FindHit } from './find-in-pr';
 import { applyPastedOrder, parsePastedOrder, type PastedOrder } from './pasted-order';
 import { watchKbdGlyphs } from './kbd-glyphs';
 import { animateDialogCancel, flash, glideScrollBy, glideScrollTo, setVisibleWithMotion } from './motion';
-import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, needsAttention, prStatus, type AttentionReason } from './status';
+import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, isConflicted, needsAttention, prStatus, type AttentionReason } from './status';
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
@@ -1085,6 +1085,7 @@ function renderDetailMeta(pull: PullRequest): void {
   dom.statusBar.innerHTML = [
     chip(`${avatar(pull)}${escapeHtml(pull.author?.login ?? 'ghost')}`, 'Author', 'plain'),
     chip(`<code>${escapeHtml(pull.headRefName)}</code><span class="arrow">→</span><code>${escapeHtml(pull.baseRefName)}</code>`, `${pull.headRefName} → ${pull.baseRefName}`, 'plain branch'),
+    isConflicted(pull) ? chip(`${icon('conflict')}Merge conflicts`, `${pull.headRefName} conflicts with ${pull.baseRefName}: rebase or merge ${pull.baseRefName} to fix`, 'conflicts tone-bad') : '',
     `<span class="status-summary" title="${escapeHtml(summary)}">${statusIcon(pull)}</span>`,
   ].join('');
   dom.merge.disabled = pull.isDraft || pull.mergeable === 'CONFLICTING' || pull.queueEntry != null || leaving.has(pull.id);
@@ -2445,8 +2446,6 @@ async function submitComment(): Promise<void> {
   }
 }
 
-const DEVIN_REPLY_PREVIEW_CHARS = 160;
-
 function sendToDevin(pull: PullRequest, sessionId: string, body: string): void {
   commentDrafts.delete(draftKey(pull, commentMode));
   dom.commentBody.value = '';
@@ -2454,11 +2453,7 @@ function sendToDevin(pull: PullRequest, sessionId: string, body: string): void {
   dom.commentDialog.close();
   toast(`Sending to Devin about #${pull.number}…`);
   void messageDevinSession(sessionId, body).then(
-    (reply) => {
-      const preview = reply.replace(/\s+/g, ' ').trim();
-      const clipped = preview.length > DEVIN_REPLY_PREVIEW_CHARS ? `${preview.slice(0, DEVIN_REPLY_PREVIEW_CHARS)}…` : preview;
-      toast(clipped === '' ? `Sent to Devin about #${pull.number}` : `Sent to Devin · #${pull.number}: ${clipped}`);
-    },
+    () => toast(`Sent to Devin · #${pull.number} (D opens the session)`),
     (error: unknown) => {
       commentDrafts.set(`devin:${pull.id}`, body);
       toast(`Devin message failed (draft kept): ${errorMessage(error)}`, true);

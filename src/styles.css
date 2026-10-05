@@ -293,6 +293,8 @@ img { -webkit-user-drag: none; }
 .chip-meta.branch code { font-size: 11.5px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; min-width: 0; max-width: 260px; }
 .chip-meta.branch code:last-of-type { flex: none; }
 .chip-meta .arrow { color: var(--text-4); }
+.chip-meta.conflicts { gap: 5px; color: var(--bad); background: color-mix(in srgb, var(--bad) 13%, transparent); border-color: color-mix(in srgb, var(--bad) 35%, transparent); font-weight: 600; }
+.chip-meta.conflicts svg { width: 13px; height: 13px; flex: none; }
 .chip-meta.delta { gap: 5px; font-variant-numeric: tabular-nums; }
 .meta-sep { width: 1px; height: 16px; background: var(--border); margin: 0 6px; flex: none; }
 .spinner { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--text-4); border-top-color: var(--accent); animation: spin .8s linear infinite; }
