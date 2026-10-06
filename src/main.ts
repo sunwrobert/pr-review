@@ -20,7 +20,7 @@ import { Lightbox, collectMedia } from './lightbox';
 import { enableWindowDrag } from './window-drag';
 import { enableTooltips } from './tooltip';
 import { groupPulls, type PullGroup } from './grouping';
-import { imageUrlsInHtml, preloadImages } from './image-cache';
+import { adoptImages, imageUrlsInHtml, preloadImages } from './image-cache';
 import { routeLinksToBrowser } from './external-links';
 import { isSemanticMatch, semanticMatches } from './semantic-search';
 import { VirtualList, type VirtualRow } from './virtual-list';
@@ -93,6 +93,7 @@ const dom = {
   triageSections: element('triage-sections'),
   triageCopy: element<HTMLButtonElement>('triage-copy'),
   triageDevin: element<HTMLButtonElement>('triage-devin'),
+  triageMessage: element<HTMLTextAreaElement>('triage-message'),
   bulkConfirmTitle: element('bulk-confirm-title'),
   bulkConfirmList: element('bulk-confirm-list'),
   bulkConfirmNote: element('bulk-confirm-note'),
@@ -149,8 +150,28 @@ function toast(message: string, isError = false): void {
   const text = dom.toast.querySelector('.toast-text');
   if (text != null) text.textContent = message;
   dom.toast.className = `show ${tone}`;
+  toastLifetimeMs = isError ? 9000 : 4500;
+  scheduleToastHide();
+}
+
+let toastLifetimeMs = 4500;
+
+document.addEventListener('pointerdown', (event) => {
+  if (dom.toast.contains(event.target as Node)) return;
+  const selection = window.getSelection();
+  if (selection != null && dom.toast.contains(selection.anchorNode)) selection.removeAllRanges();
+}, true);
+
+function scheduleToastHide(): void {
   window.clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => (dom.toast.className = tone), isError ? 9000 : 4500);
+  toastTimer = window.setTimeout(() => {
+    const hasSelection = dom.toast.contains(window.getSelection()?.anchorNode ?? null) && window.getSelection()?.isCollapsed === false;
+    if (dom.toast.matches(':hover') || hasSelection) {
+      scheduleToastHide();
+      return;
+    }
+    dom.toast.classList.remove('show');
+  }, toastLifetimeMs);
 }
 
 function errorMessage(error: unknown): string {
@@ -421,7 +442,7 @@ function readinessDot(pull: PullRequest): string {
 
 function avatar(pull: PullRequest): string {
   const url = pull.author?.avatarUrl;
-  return url == null ? '<span class="avatar"></span>' : `<img class="avatar" src="${escapeHtml(url)}&s=40" alt="" loading="lazy" />`;
+  return url == null ? '<span class="avatar"></span>' : `<img class="avatar" src="${escapeHtml(url)}&s=40" alt="" decoding="async" />`;
 }
 
 function repoName(pull: PullRequest): string {
@@ -745,7 +766,7 @@ let showBotComments = localStorage.getItem('showBotComments') !== '0';
 
 function conversationItemHtml(item: ConversationItem): string {
   const review = item.reviewState == null ? null : REVIEW_LABELS[item.reviewState] ?? { label: item.reviewState.toLowerCase(), tone: 'muted' };
-  const avatarHtml = item.avatarUrl == null ? '<span class="avatar"></span>' : `<img class="avatar" src="${escapeHtml(item.avatarUrl)}&s=48" alt="" loading="lazy" />`;
+  const avatarHtml = item.avatarUrl == null ? '<span class="avatar"></span>' : `<img class="avatar" src="${escapeHtml(item.avatarUrl)}&s=48" alt="" decoding="async" />`;
   const action = review == null ? 'commented' : `<span class="review-state tone-${review.tone}">${review.label}</span>`;
   const inline = item.inlineCount > 0 ? `<span class="muted">· ${item.inlineCount} inline comment${item.inlineCount === 1 ? '' : 's'}</span>` : '';
   const body = item.html.trim() === '' ? '' : `<div class="markdown comment-body">${sanitizeHtml(item.html)}</div>`;
@@ -762,7 +783,7 @@ function threadHtml(thread: ReviewThread): string {
   const location = `${thread.path}${thread.line != null ? `:${thread.line}` : ''}`;
   const [first, ...rest] = thread.comments;
   const commentHtml = (comment: ReviewThread['comments'][number], isReply: boolean): string => `<div class="thread-comment${isReply ? ' is-reply' : ''}">
-      <header>${comment.avatarUrl == null ? '<span class="avatar"></span>' : `<img class="avatar" src="${escapeHtml(comment.avatarUrl)}&s=40" alt="" loading="lazy" />`}<b>${escapeHtml(comment.author)}</b>${comment.isBot ? '<span class="bot-tag">bot</span>' : ''}<a class="comment-time" href="${escapeHtml(comment.url)}" title="Open on GitHub">${relativeTime(comment.at)} ago</a></header>
+      <header>${comment.avatarUrl == null ? '<span class="avatar"></span>' : `<img class="avatar" src="${escapeHtml(comment.avatarUrl)}&s=40" alt="" decoding="async" />`}<b>${escapeHtml(comment.author)}</b>${comment.isBot ? '<span class="bot-tag">bot</span>' : ''}<a class="comment-time" href="${escapeHtml(comment.url)}" title="Open on GitHub">${relativeTime(comment.at)} ago</a></header>
       <div class="markdown comment-body">${sanitizeHtml(comment.html)}</div>
     </div>`;
   const resolveLabel = thread.isResolved ? 'Unresolve' : 'Resolve';
@@ -848,14 +869,14 @@ async function toggleThreadResolved(threadId: string, resolved: boolean): Promis
   try {
     await setThreadResolved(threadId, resolved);
     forgetThreads(pull);
-    toast(resolved ? `Resolved thread on ${thread.path}` : `Reopened thread on ${thread.path}`);
+    toast(`${resolved ? 'Resolved' : 'Reopened'} thread on ${thread.path} · #${pull.number}`);
   } catch (error) {
     thread.isResolved = previous;
     renderThreads(section, currentThreads);
     pull.openThreads = currentThreads.filter((candidate) => !candidate.isResolved).length;
     invalidateList();
     renderList();
-    toast(errorMessage(error), true);
+    toast(`Updating thread on ${thread.path} · #${pull.number} failed: ${errorMessage(error)}`, true);
   }
 }
 
@@ -868,11 +889,11 @@ async function sendThreadReply(threadId: string, form: HTMLElement, alsoResolve:
   try {
     await replyToThread(threadId, body);
     if (alsoResolve) await setThreadResolved(threadId, true);
-    toast(alsoResolve ? 'Replied and resolved' : 'Replied');
+    toast(`${alsoResolve ? 'Replied and resolved' : 'Replied'} on #${pull.number}`);
     await refreshThreads(pull, dom.descPane, renderToken, true);
   } catch (error) {
     form.querySelectorAll('button').forEach((button) => (button.disabled = false));
-    toast(errorMessage(error), true);
+    toast(`Reply on #${pull.number} failed: ${errorMessage(error)}`, true);
   }
 }
 
@@ -880,7 +901,7 @@ function jumpToThread(threadId: string): void {
   const thread = currentThreads.find((candidate) => candidate.id === threadId);
   const file = currentFiles.find((candidate) => candidate.diff.name === thread?.path);
   if (thread == null || file == null) {
-    toast('That file is not in the current diff', true);
+    toast(`${thread?.path ?? 'That file'} is not in the current diff`, true);
     return;
   }
   if (thread.line != null) diffView.scrollToLine(file.id, thread.line, 'additions');
@@ -891,7 +912,7 @@ function focusFirstOpenThread(): void {
   const section = dom.descPane.querySelector<HTMLElement>('[data-threads]');
   const first = section?.querySelector<HTMLElement>('.thread:not(.is-resolved)') ?? (currentThreads.length > 0 ? section?.querySelector<HTMLElement>('.conversation-head') : null);
   if (section == null || first == null) {
-    toast('No review threads on this PR');
+    toast(`No review threads on #${selectedPull()?.number ?? ""}`);
     return;
   }
   glideScrollTo(dom.descPane, dom.descPane.scrollTop + first.getBoundingClientRect().top - dom.descPane.getBoundingClientRect().top - 12);
@@ -962,6 +983,7 @@ function renderConversation(container: Element, items: ConversationItem[]): void
       const holder = document.createElement('div');
       holder.innerHTML = conversationItemHtml(item);
       const node = holder.firstElementChild as HTMLElement;
+      adoptImages(existing.values(), [node]);
       node.dataset.commentId = item.id;
       node.dataset.commentSize = String(item.html.length);
       return node;
@@ -1130,6 +1152,8 @@ function syncQueueState(pull: PullRequest): void {
   });
 }
 
+let lastDescription: { pullId: string; element: HTMLElement } | null = null;
+
 function renderDetail(pull: PullRequest): void {
   syncQueueState(pull);
   currentThreads = [];
@@ -1139,6 +1163,8 @@ function renderDetail(pull: PullRequest): void {
   dom.crumbs.innerHTML = `<span class="repo" title="${escapeHtml(pull.repository.nameWithOwner)}">${escapeHtml(repoName(pull))}</span><span class="sep">›</span><a class="cur pr-link" href="${escapeHtml(pull.url)}" title="Open on GitHub  O">#${pull.number}</a>`;
   renderDetailMeta(pull);
   const description = renderDescription(pull);
+  const previousDescription = lastDescription?.pullId === pull.id ? lastDescription.element : null;
+  lastDescription = { pullId: pull.id, element: description };
   if (reviewMode === 'side') {
     dom.descPane.replaceChildren(description);
     diffView.setHeader(undefined);
@@ -1153,6 +1179,12 @@ function renderDetail(pull: PullRequest): void {
       const section = description.querySelector('[data-conversation]');
       if (section == null) return;
       renderConversation(section, items);
+      const previousList = previousDescription?.querySelector('.conversation-list');
+      const list = section.querySelector('.conversation-list');
+      if (previousList != null && list != null) {
+        adoptImages([previousList], [list]);
+        list.classList.remove('fade-in');
+      }
       void refreshThreads(pull, description, token);
       section.addEventListener('click', (event) => {
         if ((event.target as HTMLElement).closest('[data-toggle-bots]') == null) return;
@@ -1175,7 +1207,9 @@ function renderDetail(pull: PullRequest): void {
         const html = descriptionHtml(bodyHtml);
         target.innerHTML = html;
         target.setAttribute('data-body', html);
-        target.classList.add('fade-in');
+        const previousBody = previousDescription?.querySelector('.markdown');
+        if (previousBody?.getAttribute('data-body') === html) adoptImages([previousBody], [target]);
+        else target.classList.add('fade-in');
       }
     },
     (error: unknown) => {
@@ -2110,7 +2144,7 @@ async function approveSelected(): Promise<void> {
     toast(`Approved #${pull.number}`);
     void refresh(state.kind);
   } catch (error) {
-    toast(errorMessage(error), true);
+    toast(`Approve #${pull.number} failed: ${errorMessage(error)}`, true);
   } finally {
     dom.approve.disabled = isOwnPull(pull);
   }
@@ -2130,7 +2164,7 @@ async function mergeSelected(): Promise<void> {
   const isQueued = await usesMergeQueue(pull);
   if (!isQueued && !(await confirmMerge(pull, MERGE_METHOD))) return;
   const failure = await runMerge(pull, isQueued);
-  if (failure != null) toast(failure.replace(/^#\d+: /, ''), true);
+  if (failure != null) toast(`Merge #${pull.number} failed: ${failure.replace(/^#\d+: /, '')}`, true);
   else toast(isQueued ? `#${pull.number} added to the merge queue` : `Merged #${pull.number}`);
   void refresh(state.kind);
 }
@@ -2166,7 +2200,7 @@ function applyLayoutPreset(preset: LayoutPreset): void {
 
 const layout = new Layout(element('app'), () => syncPaneButtons());
 layoutRef = layout;
-const lightbox = new Lightbox((url) => void openInBrowser(url).catch((error: unknown) => toast(errorMessage(error), true)));
+const lightbox = new Lightbox((url) => void openInBrowser(url).catch((error: unknown) => toast(`Opening ${url} failed: ${errorMessage(error)}`, true)));
 
 function descriptionRoot(): HTMLElement | null {
   return document.querySelector<HTMLElement>('#pr-body-split .description');
@@ -2175,7 +2209,7 @@ function descriptionRoot(): HTMLElement | null {
 function openMedia(index = 0): void {
   const root = descriptionRoot();
   const items = root == null ? [] : collectMedia(root);
-  if (!lightbox.open(items, index)) toast('No images, videos or HTML previews in this description');
+  if (!lightbox.open(items, index)) toast(`No images, videos or HTML previews in #${selectedPull()?.number ?? ''}'s description`);
 }
 
 function openMediaFrom(target: HTMLElement): boolean {
@@ -2251,6 +2285,7 @@ function openTriage(): void {
   dom.triage.returnValue = '';
   dom.triage.showModal();
   dom.triageCopy.focus();
+  dom.triageMessage.value = triageMessageDraft;
 }
 
 dom.triage.addEventListener('change', (event) => {
@@ -2258,8 +2293,12 @@ dom.triage.addEventListener('change', (event) => {
   if (input.dataset.pull != null) setTriagePicked([input.dataset.pull], input.checked);
   else if (input.dataset.reason != null) setTriagePicked(triagePulls.filter((pull) => attentionReasons(pull).includes(input.dataset.reason as AttentionReason)).map((pull) => pull.id), input.checked);
 });
+let triageMessageDraft = '';
+dom.triageMessage.addEventListener('input', () => (triageMessageDraft = dom.triageMessage.value));
+
 dom.triage.addEventListener('keydown', (event) => {
-  if (event.key.toLowerCase() === 'a' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+  if (event.target === dom.triageMessage && event.key === 'Enter' && !(event.metaKey || event.ctrlKey)) return;
+  if (event.target !== dom.triageMessage && event.key.toLowerCase() === 'a' && !event.metaKey && !event.ctrlKey && !event.altKey) {
     event.preventDefault();
     setTriagePicked(triagePulls.map((pull) => pull.id), triageExcluded.size > 0);
     return;
@@ -2274,7 +2313,7 @@ dom.triage.addEventListener('close', () => {
   const targets = triageTargets();
   if (targets.length === 0) return;
   if (dom.triage.returnValue === 'devin') {
-    void sendTriageToDevin(targets);
+    void sendTriageToDevin(targets, dom.triageMessage.value.trim() || BULK_FIX_MESSAGE);
     return;
   }
   if (dom.triage.returnValue !== 'copy') return;
@@ -2344,7 +2383,7 @@ async function openPreview(): Promise<void> {
   }
   await openInBrowser(url).then(
     () => toast(`Opened preview for #${pull.number}`),
-    (error: unknown) => toast(errorMessage(error), true),
+    (error: unknown) => toast(`Opening preview for #${pull.number} failed: ${errorMessage(error)}`, true),
   );
 }
 
@@ -2371,7 +2410,7 @@ async function openDevinSession(): Promise<void> {
   }
   await openInBrowser(url).then(
     () => toast(`Opened Devin session for #${pull.number}`),
-    (error: unknown) => toast(errorMessage(error), true),
+    (error: unknown) => toast(`Opening Devin session for #${pull.number} failed: ${errorMessage(error)}`, true),
   );
 }
 
@@ -2380,13 +2419,13 @@ function openSelectedOnGitHub(): void {
   if (pull == null) return;
   void openInBrowser(pull.url).then(
     () => toast(`Opened #${pull.number} on GitHub`),
-    (error: unknown) => toast(errorMessage(error), true),
+    (error: unknown) => toast(`Opening #${pull.number} on GitHub failed: ${errorMessage(error)}`, true),
   );
 }
 
 function copyText(text: string, label: string): void {
   void navigator.clipboard.writeText(text).then(
-    () => toast(`Copied ${label}`),
+    () => toast(`Copied ${label}: ${text}`),
     () => toast('Clipboard unavailable', true),
   );
 }
@@ -2500,7 +2539,7 @@ async function submitComment(): Promise<void> {
     invalidateConversation(pull);
     if (selectedPull()?.id === pull.id) renderDetail(pull);
   } catch (error) {
-    toast(errorMessage(error), true);
+    toast(`Comment on #${pull.number} failed: ${errorMessage(error)}`, true);
     dom.commentSend.disabled = false;
   }
 }
@@ -2543,46 +2582,45 @@ async function fixWithDevin(): Promise<void> {
 
 const DEVIN_BULK_CONCURRENCY = 4;
 
-async function sendTriageToDevin(targets: readonly PullRequest[]): Promise<void> {
-  toast(`Finding Devin sessions for ${targets.length} PR${targets.length === 1 ? '' : 's'}…`);
-  const outcomes: ('sent' | 'no-session' | 'failed')[] = [];
+async function sendTriageToDevin(targets: readonly PullRequest[], message: string): Promise<void> {
+  toast(`Finding Devin sessions for ${targets.map((pull) => `#${pull.number}`).join(', ')}…`);
+  const sent: number[] = [];
+  const skipped: number[] = [];
   const failures: string[] = [];
   const queue = [...targets];
   const worker = async (): Promise<void> => {
     for (let pull = queue.shift(); pull != null; pull = queue.shift()) {
       const sessionId = await devinSessionFor(pull).catch(() => null);
       if (sessionId == null) {
-        outcomes.push('no-session');
+        skipped.push(pull.number);
         continue;
       }
-      await messageDevinSession(sessionId, BULK_FIX_MESSAGE).then(
-        () => outcomes.push('sent'),
-        (error: unknown) => {
-          outcomes.push('failed');
-          failures.push(`#${pull.number}: ${errorMessage(error)}`);
-        },
+      await messageDevinSession(sessionId, message).then(
+        () => sent.push(pull.number),
+        (error: unknown) => failures.push(`#${pull.number} (${errorMessage(error)})`),
       );
     }
   };
   await Promise.all(Array.from({ length: Math.min(DEVIN_BULK_CONCURRENCY, targets.length) }, worker));
-  const count = (outcome: string): number => outcomes.filter((value) => value === outcome).length;
-  const parts = [`Sent “${BULK_FIX_MESSAGE}” to ${count('sent')} Devin session${count('sent') === 1 ? '' : 's'}`];
-  if (count('no-session') > 0) parts.push(`${count('no-session')} without a session`);
-  if (count('failed') > 0) parts.push(`${count('failed')} failed (${failures[0]})`);
-  toast(parts.join(' · '), count('failed') > 0 || count('sent') === 0);
+  const list = (numbers: number[]): string => numbers.sort((left, right) => left - right).map((number) => `#${number}`).join(', ');
+  const quoted = message.length > 60 ? `${message.slice(0, 60)}…` : message;
+  const parts = [sent.length > 0 ? `Sent “${quoted}” to Devin for ${list(sent)}` : `Sent “${quoted}” to no Devin sessions`];
+  if (skipped.length > 0) parts.push(`no session on ${list(skipped)}`);
+  if (failures.length > 0) parts.push(`failed: ${failures.join(', ')}`);
+  toast(parts.join(' · '), failures.length > 0 || sent.length === 0);
 }
 
 function deliverToDevin(pull: PullRequest, sessionId: string, body: string, onSettled?: () => void): void {
-  toast(`Sending to Devin about #${pull.number}…`);
+  toast(`Sending to Devin · #${pull.number}…`);
   void messageDevinSession(sessionId, body).then(
     () => {
       onSettled?.();
-      toast(`Sent to Devin · #${pull.number} (D opens the session)`);
+      toast(`Sent to Devin · #${pull.number}: “${body.length > 60 ? `${body.slice(0, 60)}…` : body}”`);
     },
     (error: unknown) => {
       onSettled?.();
       if (onSettled == null) commentDrafts.set(`devin:${pull.id}`, body);
-      toast(`Devin message failed: ${errorMessage(error)}`, true);
+      toast(`Devin message for #${pull.number} failed: ${errorMessage(error)}`, true);
     },
   );
 }

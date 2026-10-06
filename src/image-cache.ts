@@ -45,3 +45,25 @@ export function imageUrlsInHtml(html: string): string[] {
   }
   return [...urls];
 }
+
+/** Swaps freshly parsed <img> nodes for already-decoded ones with the same src, so rebuilt markup doesn't flash blank. */
+export function adoptImages(previous: Iterable<Element>, next: Iterable<Element>): void {
+  const pool = new Map<string, HTMLImageElement[]>();
+  for (const root of previous) {
+    for (const image of root.matches('img') ? [root as HTMLImageElement] : root.querySelectorAll('img')) {
+      if (!image.complete || image.naturalWidth === 0) continue;
+      const list = pool.get(image.src) ?? [];
+      list.push(image);
+      pool.set(image.src, list);
+    }
+  }
+  if (pool.size === 0) return;
+  for (const root of next) {
+    for (const image of root.matches('img') ? [root as HTMLImageElement] : [...root.querySelectorAll('img')]) {
+      const kept = pool.get(image.src)?.shift();
+      if (kept == null || kept === image) continue;
+      for (const name of image.getAttributeNames()) if (name !== 'src' && kept.getAttribute(name) !== image.getAttribute(name)) kept.setAttribute(name, image.getAttribute(name) ?? '');
+      image.replaceWith(kept);
+    }
+  }
+}

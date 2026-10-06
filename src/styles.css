@@ -177,7 +177,8 @@ button:disabled { opacity: .4; pointer-events: none; }
 diffs-container { overflow: visible !important; --diffs-font-size: 12px; --diffs-line-height: 19px; --diffs-font-family: 'Berkeley Mono', 'SF Mono', ui-monospace, monospace; --diffs-header-font-family: 'Inter', -apple-system, system-ui, sans-serif; --diffs-dark-bg: #111214; --diffs-light-bg: #ffffff; }
 
 #toast { position: fixed; bottom: 24px; left: 50%; z-index: 100; display: flex; align-items: flex-start; gap: 12px; min-width: 320px; max-width: min(640px, 80vw); transform: translate(-50%, 16px); background: var(--toast-bg); border: 1px solid var(--border); border-left: 3px solid var(--accent); color: var(--text); padding: 14px 18px 14px 14px; border-radius: 12px; opacity: 0; transition: opacity .18s, transform .18s; pointer-events: none; box-shadow: 0 16px 48px rgb(0 0 0 / .35); font-size: 14px; line-height: 1.45; }
-#toast.show { opacity: 1; transform: translate(-50%, 0); }
+#toast.show { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
+#toast .toast-text { -webkit-user-select: text; user-select: text; cursor: text; }
 #toast .toast-icon { flex: none; display: grid; place-items: center; width: 22px; height: 22px; margin-top: -1px; color: var(--accent); }
 #toast .toast-text { overflow-wrap: anywhere; }
 #toast.success { border-left-color: var(--ok); }
@@ -937,3 +938,6 @@ kbd[data-glyph='backspace'] { --kbd-glyph: url("data:image/svg+xml,%3Csvg%20xmln
 
 #triage .triage-devin { display: inline-flex; align-items: center; gap: 6px; }
 #triage .triage-devin .devin-logo { width: 13px; height: 13px; }
+.triage-prompt { display: flex; flex-direction: column; gap: 6px; margin: 0 0 14px; font-size: 12px; color: var(--text-3); }
+.triage-prompt textarea { resize: vertical; min-height: 44px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-elev); color: var(--text); font: inherit; font-size: 13px; }
+.triage-prompt textarea:focus { outline: none; border-color: var(--accent); }

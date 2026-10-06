@@ -1,3 +1,4 @@
+import { adoptImages } from './image-cache';
 export interface VirtualRow {
   key: string;
   height: number;
@@ -5,6 +6,7 @@ export interface VirtualRow {
 }
 
 const OVERSCAN_PX = 480;
+const renderedHtml = new WeakMap<HTMLElement, string>();
 
 export class VirtualList {
   private rows: VirtualRow[] = [];
@@ -136,6 +138,40 @@ export class VirtualList {
     this.renderedRange = range;
     this.spacerTop.style.height = `${this.offsets[start] ?? 0}px`;
     this.spacerBottom.style.height = `${Math.max(0, total - (this.offsets[end] ?? total))}px`;
-    this.window.innerHTML = this.rows.slice(start, end).map((row) => row.render()).join('');
+    this.patchWindow(this.rows.slice(start, end).map((row) => row.render()));
+  }
+
+  /** Reuses row nodes whose markup is unchanged so their images keep their decoded pixels instead of flashing. */
+  private patchWindow(htmlList: readonly string[]): void {
+    const existing = new Map<string, HTMLElement>();
+    for (const node of this.window.children) if (node instanceof HTMLElement) existing.set(renderedHtml.get(node) ?? '', node);
+    const renderedHtmlReused = new Set<HTMLElement>();
+    const template = document.createElement('template');
+    template.innerHTML = htmlList.join('');
+    const fresh = [...template.content.children] as HTMLElement[];
+    const nodes = fresh.map((node, index) => {
+      const html = htmlList[index] ?? '';
+      const kept = existing.get(html);
+      if (kept == null) {
+        renderedHtml.set(node, html);
+        return node;
+      }
+      existing.delete(html);
+      syncRootAttributes(kept, node);
+      renderedHtmlReused.add(kept);
+      return kept;
+    });
+    const isSame = nodes.length === this.window.children.length && nodes.every((node, index) => this.window.children[index] === node);
+    if (isSame) return;
+    adoptImages(existing.values(), nodes.filter((node) => !renderedHtmlReused.has(node)));
+    this.window.replaceChildren(...nodes);
+  }
+}
+
+function syncRootAttributes(target: HTMLElement, source: HTMLElement): void {
+  for (const name of target.getAttributeNames()) if (!source.hasAttribute(name)) target.removeAttribute(name);
+  for (const name of source.getAttributeNames()) {
+    const value = source.getAttribute(name) ?? '';
+    if (target.getAttribute(name) !== value) target.setAttribute(name, value);
   }
 }

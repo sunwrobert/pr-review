@@ -4,7 +4,9 @@ import { generateBody, generateDiff, generatePulls, type FixturePull } from '../
 const COUNT = Number(new URLSearchParams(location.search).get('pulls') ?? 120);
 const LATENCY_MS = Number(new URLSearchParams(location.search).get('latency') ?? 0);
 const IS_DEMO = new URLSearchParams(location.search).has('demo');
-const pulls = IS_DEMO ? DEMO_PULLS : generatePulls(COUNT);
+const WITH_IMAGES = new URLSearchParams(location.search).has('images');
+const IMAGE_HTML = (seed: number): string => `<p><img src="https://camo.githubusercontent.com/test-${seed}" alt="shot ${seed}" width="600" height="300" /></p>`;
+const pulls = (IS_DEMO ? DEMO_PULLS : generatePulls(COUNT)).map((pull) => (WITH_IMAGES ? { ...pull, author: { ...pull.author, avatarUrl: `https://avatars.githubusercontent.com/u/${pull.number % 7}?v=4` } } : pull));
 const byId = new Map(pulls.map((pull) => [pull.id, pull]));
 const byNumber = new Map(pulls.map((pull) => [pull.number, pull]));
 const calls: Record<string, number> = {};
@@ -45,7 +47,7 @@ function mergeStateOf(pull: FixturePull): Record<string, unknown> {
 const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   queue: () => JSON.stringify([{ data: { search: { nodes: pulls } } }]),
   merge_states: (args) => JSON.stringify({ data: Object.fromEntries((args.ids as string[]).map((id, index) => [`p${index}`, byId.has(id) ? mergeStateOf(byId.get(id) as FixturePull) : null])) }),
-  body: (args) => { const pull = byNumber.get(args.number as number) ?? pulls[0]!; return IS_DEMO ? demoBody(pull) : generateBody(pull); },
+  body: (args) => { const pull = byNumber.get(args.number as number) ?? pulls[0]!; const html = IS_DEMO ? demoBody(pull) : generateBody(pull); return WITH_IMAGES ? `${IMAGE_HTML(pull.number)}${html}${IMAGE_HTML(pull.number + 1)}` : html; },
   diff: (args) => { const pull = byNumber.get(args.number as number) ?? pulls[0]!; return (IS_DEMO ? demoDiff(pull) : null) ?? generateDiff(pull); },
   conversation: (args) => IS_DEMO ? JSON.stringify(demoConversation(byNumber.get(args.number as number) ?? pulls[0]!)) : JSON.stringify({ data: { repository: { pullRequest: { comments: { totalCount: 2, nodes: [
     { id: 'c1', bodyHTML: `<p>Long review note.</p>${'<p>Line of detail that goes on for a while to make this comment tall.</p>'.repeat(30)}`, createdAt: '2026-09-26T10:00:00Z', url: 'https://github.com/o/web/pull/1#c1', author: { login: 'reviewer', avatarUrl: '', __typename: 'User' } },
