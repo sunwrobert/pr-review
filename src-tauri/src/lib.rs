@@ -54,7 +54,37 @@ fn gh_binary() -> &'static str {
         .unwrap_or("gh")
 }
 
+const GH_MAX_CONCURRENT: usize = 6;
+const GH_RETRY_DELAYS_MS: [u64; 3] = [400, 1_200, 3_000];
+
+static GH_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(GH_MAX_CONCURRENT);
+
+/** Failures that happen before the request leaves the machine, so retrying can never repeat a mutation. */
+fn is_retryable_network_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    ["tls handshake timeout", "dial tcp", "connection refused", "no such host", "network is unreachable", "temporary failure in name resolution"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
 async fn gh(args: &[&str]) -> Result<String, String> {
+    let mut attempt = 0;
+    loop {
+        let result = {
+            let _slot = GH_SLOTS.acquire().await.map_err(|error| error.to_string())?;
+            gh_once(args).await
+        };
+        match result {
+            Err(message) if attempt < GH_RETRY_DELAYS_MS.len() && is_retryable_network_error(&message) => {
+                tokio::time::sleep(std::time::Duration::from_millis(GH_RETRY_DELAYS_MS[attempt])).await;
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
+}
+
+async fn gh_once(args: &[&str]) -> Result<String, String> {
     let child = Command::new(gh_binary())
         .args(args)
         .env("GH_PROMPT_DISABLED", "1")
@@ -502,3 +532,17 @@ pub fn run() {
         .expect("error while running PR Review");
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::is_retryable_network_error;
+
+    #[test]
+    fn retries_only_failures_before_the_request_is_sent() {
+        assert!(is_retryable_network_error("Post \"https://api.github.com/graphql\": net/http: TLS handshake timeout"));
+        assert!(is_retryable_network_error("dial tcp: lookup api.github.com: no such host"));
+        assert!(!is_retryable_network_error("HTTP 502: Bad Gateway"));
+        assert!(!is_retryable_network_error("read tcp 10.0.0.2:5000->140.82.112.6:443: read: connection reset by peer"));
+        assert!(!is_retryable_network_error("GraphQL: Pull request is not mergeable"));
+    }
+}
