@@ -13,6 +13,8 @@ bun run bench:noise      # A/A self-test; SCORE should sit within ~1% of 1.0.
 
 `SCORE` is the weighted geometric mean of baseline/candidate ratios across scenarios, so `> 1` is faster. Weights favour deterministic browser counters (layouts, style recalcs, rendered rows, long tasks) over timings, which drift a few percent run to run.
 
+Each scenario also checks that its work happened (selection moved, filter holds the typed text, picker opened, diff scrolled, `r` refetched, no dialog left open, no page errors). Any failure prints under `WORK CHECKS` and forces `SCORE 0`. A run that hangs past 60s is relaunched (up to twice) and reported as `RETRIES`; a key whose frame never arrives within 5s is left out of p95 and reported as `FRAME STALLS`. Pass `--spread` to print each scenario's min–max range per side, so you can tell a real gap from run-to-run noise.
+
 Chromium runs with `prefers-reduced-motion: reduce`, so intentional animation frames are not scored as work; set `BENCH_MOTION=1` to include them. Knobs: `BENCH_RUNS` (default 5), `BENCH_PULLS` (400), `BENCH_CPU` (4× throttle), `CLIMB_NOISE` (1.02), `CLIMB_BASE` (HEAD), `PROPERTY_RUNS` (2000), `MODEL_RUNS` (40), `MODEL_STEPS` (30), `MODEL_SEED` to replay a failure.
 
 ## Contract for agents hill-climbing on this

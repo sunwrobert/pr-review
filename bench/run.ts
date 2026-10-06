@@ -63,7 +63,17 @@ async function keyLatencies(page: Page, keys: string[]): Promise<number[]> {
   for (const key of keys) {
     const started = await page.evaluate(() => performance.now());
     await page.keyboard.press(key);
-    const painted = await page.evaluate(() => new Promise<number>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(performance.now())))));
+    const painted = await page.evaluate((limit) => new Promise<number>((resolve) => {
+      const fallback = setTimeout(() => resolve(-1), limit);
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        clearTimeout(fallback);
+        resolve(performance.now());
+      }));
+    }), FRAME_TIMEOUT_MS);
+    if (painted < 0) {
+      frameStalls += 1;
+      continue;
+    }
     latencies.push(painted - started);
   }
   return latencies;
@@ -74,17 +84,38 @@ function percentile(values: number[], fraction: number): number {
   return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * fraction))] ?? 0;
 }
 
-type Scenario = { name: string; run(page: Page): Promise<number[]> };
+type Scenario = { name: string; run(page: Page): Promise<number[]>; verify(page: Page): Promise<string | null> };
+
+const selectedId = (page: Page): Promise<string | null> => page.evaluate(() => document.querySelector('#pr-list li.selected')?.getAttribute('data-id') ?? null);
+const openDialogs = (page: Page): Promise<string[]> => page.evaluate(() => [...document.querySelectorAll('dialog[open]')].map((dialog) => dialog.id));
+let lastSelected: string | null = null;
 
 const SCENARIOS: Scenario[] = [
-  { name: 'navigate-list', run: (page) => keyLatencies(page, Array.from({ length: 60 }, () => 'j')) },
-  { name: 'filter-chips', run: (page) => keyLatencies(page, ['Alt+1', 'Alt+2', 'Alt+3', 'Alt+4', 'Alt+0', 'Alt+1', 'Alt+0']) },
-  { name: 'visual-select', run: (page) => keyLatencies(page, ['Shift+V', ...Array.from({ length: 30 }, () => 'j'), 'Shift+V', 'Escape']) },
+  {
+    name: 'navigate-list',
+    run: async (page) => {
+      lastSelected = await selectedId(page);
+      return keyLatencies(page, Array.from({ length: 60 }, () => 'j'));
+    },
+    verify: async (page) => ((await selectedId(page)) === lastSelected ? 'j did not move the selection' : null),
+  },
+  {
+    name: 'filter-chips',
+    run: (page) => keyLatencies(page, ['Alt+1', 'Alt+2', 'Alt+3', 'Alt+4', 'Alt+0', 'Alt+1', 'Alt+0']),
+    verify: async (page) => ((await page.evaluate(() => document.querySelector('[data-smart].active')?.getAttribute('data-smart'))) === 'all' ? null : 'filter chips did not end on All'),
+  },
+  {
+    name: 'visual-select',
+    run: (page) => keyLatencies(page, ['Shift+V', ...Array.from({ length: 30 }, () => 'j'), 'Shift+V', 'Escape']),
+    verify: async () => null,
+  },
   {
     name: 'type-filter',
     run: async (page) => {
-      await page.keyboard.press('f');
-      const latencies = await keyLatencies(page, [...'refactor'].map((character) => character));
+      await page.keyboard.press('/');
+      const latencies = await keyLatencies(page, [...'refactor']);
+      const state = await page.evaluate(() => ({ value: (document.getElementById('filter') as HTMLInputElement).value, rows: document.querySelectorAll('#pr-list li[data-id]').length }));
+      Object.assign(globalThis, { __filterState: state });
       await page.keyboard.press('Escape');
       await page.evaluate(() => {
         const input = document.getElementById('filter') as HTMLInputElement;
@@ -93,23 +124,86 @@ const SCENARIOS: Scenario[] = [
       });
       return latencies;
     },
+    verify: async () => {
+      const state = (globalThis as unknown as { __filterState?: { value: string; rows: number } }).__filterState;
+      return state?.value === 'refactor' ? null : `filter input held "${state?.value ?? ''}", not "refactor"`;
+    },
   },
   {
     name: 'theme-preview',
     run: async (page) => {
       await page.keyboard.press('t');
+      Object.assign(globalThis, { __themeOpen: (await openDialogs(page)).includes('theme-picker') });
       const latencies = await keyLatencies(page, Array.from({ length: 12 }, () => 'ArrowDown'));
       await page.keyboard.press('Escape');
       return latencies;
     },
+    verify: async () => ((globalThis as unknown as { __themeOpen?: boolean }).__themeOpen === true ? null : 'theme picker did not open'),
   },
-  { name: 'scroll-diff', run: (page) => keyLatencies(page, Array.from({ length: 20 }, () => 'Meta+j')) },
+  {
+    name: 'scroll-diff',
+    run: async (page) => {
+      await page.evaluate(() => (document.getElementById('diff-root')!.scrollTop = 0));
+      return keyLatencies(page, Array.from({ length: 20 }, () => 'Meta+j'));
+    },
+    verify: async (page) => ((await page.evaluate(() => document.getElementById('diff-root')!.scrollTop)) > 0 ? null : 'diff did not scroll'),
+  },
+  {
+    name: 'refresh',
+    run: async (page) => {
+      Object.assign(globalThis, { __queueCallsBefore: await page.evaluate(() => (window as unknown as { __shimCalls: Record<string, number> }).__shimCalls.queue ?? 0) });
+      const latencies = await keyLatencies(page, ['r']);
+      await page.waitForTimeout(400);
+      return latencies;
+    },
+    verify: async (page) => {
+      const before = (globalThis as unknown as { __queueCallsBefore: number }).__queueCallsBefore;
+      const after = await page.evaluate(() => (window as unknown as { __shimCalls: Record<string, number> }).__shimCalls.queue ?? 0);
+      return after > before ? null : 'r did not refetch the queue';
+    },
+  },
 ];
 
+const failures: string[] = [];
+
+const RUN_TIMEOUT_MS = 60_000;
+let liveBrowser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
+const FRAME_TIMEOUT_MS = 5_000;
+let frameStalls = 0;
+let baseUrlPort = '';
+
 async function runOnce(url: string): Promise<ScenarioResult[]> {
-  const browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ['--disable-gpu-vsync', '--disable-frame-rate-limit'] });
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await runOnceBounded(url);
+    } catch (error) {
+      if (attempt >= 3) throw error;
+      console.error(`retrying run after: ${error instanceof Error ? error.message : String(error)}`);
+      retries += 1;
+    }
+  }
+}
+
+let retries = 0;
+
+async function runOnceBounded(url: string): Promise<ScenarioResult[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new Error(`bench run exceeded ${RUN_TIMEOUT_MS / 1000}s at ${(globalThis as unknown as { __benchStage?: string }).__benchStage ?? 'startup'}`)), RUN_TIMEOUT_MS)));
+  try {
+    return await Promise.race([runOnceUnbounded(url), timeout]);
+  } finally {
+    clearTimeout(timer);
+    const closing = liveBrowser?.close().catch(() => undefined);
+    liveBrowser = null;
+    await Promise.race([closing, new Promise((resolve) => setTimeout(resolve, 5_000))]);
+  }
+}
+
+async function runOnceUnbounded(url: string): Promise<ScenarioResult[]> {
+  liveBrowser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ['--disable-gpu-vsync', '--disable-frame-rate-limit'] });
+  const browser = liveBrowser;
   const page = await browser.newPage({ viewport: { width: 1480, height: 940 }, deviceScaleFactor: 1, reducedMotion: process.env.BENCH_MOTION === '1' ? 'no-preference' : 'reduce' });
-  page.on('pageerror', (error) => console.error('pageerror', error.message));
+  page.on('pageerror', (error) => failures.push(`page error: ${error.message}`));
   await page.addInitScript(() => {
     localStorage.setItem('smartFilter', 'all');
     localStorage.setItem('themeId', 'dark');
@@ -118,7 +212,9 @@ async function runOnce(url: string): Promise<ScenarioResult[]> {
   });
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('Performance.enable');
+  Object.assign(globalThis, { __benchStage: 'goto' });
   await page.goto(`${url}/?pulls=${PULLS}`);
+  Object.assign(globalThis, { __benchStage: 'first rows' });
   await page.waitForFunction(() => document.querySelectorAll('#pr-list li[data-id]').length > 0, undefined, { timeout: 20_000 });
   await settle(page);
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: CPU_THROTTLE });
@@ -128,8 +224,12 @@ async function runOnce(url: string): Promise<ScenarioResult[]> {
     const longBefore = await page.evaluate(() => (window as unknown as { __longTasks: number }).__longTasks);
     let maxRenderedRows = 0;
     const started = Date.now();
+    Object.assign(globalThis, { __benchStage: `${url.endsWith(String(baseUrlPort)) ? 'base' : 'candidate'} ${scenario.name}` });
     const latencies = await scenario.run(page);
+    Object.assign(globalThis, { __benchStage: `${scenario.name} settle` });
     await settle(page);
+    const problem = (await scenario.verify(page)) ?? ((await openDialogs(page)).length > 0 ? `left dialogs open: ${(await openDialogs(page)).join(', ')}` : null);
+    if (problem != null) failures.push(`${scenario.name}: ${problem}`);
     maxRenderedRows = await page.evaluate(() => document.querySelectorAll('#pr-list li[data-id]').length);
     const after = await metrics(cdp);
     const longAfter = await page.evaluate(() => (window as unknown as { __longTasks: number }).__longTasks);
@@ -190,12 +290,22 @@ async function main(): Promise<void> {
   if (!isSelfTest) await buildRef(ref);
   const candidateServer = serve(DIST);
   const baseServer = serve(isSelfTest ? DIST : BASE_DIST);
+  baseUrlPort = baseServer.url.split(':').at(-1) ?? '';
   try {
     const candidateRuns: ScenarioResult[][] = [];
     const baseRuns: ScenarioResult[][] = [];
     for (let run = 0; run < RUNS; run += 1) {
+      const started = Date.now();
       baseRuns.push(await runOnce(baseServer.url));
       candidateRuns.push(await runOnce(candidateServer.url));
+      console.error(`run ${run + 1}/${RUNS} · ${((Date.now() - started) / 1000).toFixed(1)}s`);
+    }
+    const spread = (runs: ScenarioResult[][], key: keyof Omit<ScenarioResult, 'name'>): string => runs[0]!.map((first, index) => { const values = runs.map((run) => run[index]![key]).sort((left, right) => left - right); return `${first.name} ${Math.round(values[0]!)}–${Math.round(values.at(-1)!)}`; }).join(' · ');
+    if (args.has('--spread')) {
+      console.log(`taskMs range base:      ${spread(baseRuns, 'taskMs')}`);
+      console.log(`taskMs range candidate: ${spread(candidateRuns, 'taskMs')}`);
+      console.log(`p95KeyMs range base:      ${spread(baseRuns, 'p95KeyMs')}`);
+      console.log(`p95KeyMs range candidate: ${spread(candidateRuns, 'p95KeyMs')}`);
     }
     const scenarios = combine(candidateRuns);
     const baseline = combine(baseRuns);
@@ -205,7 +315,12 @@ async function main(): Promise<void> {
       console.log(`working tree vs ${report.against} · ${RUNS} interleaved runs · ${PULLS} PRs · ${CPU_THROTTLE}× CPU throttle`);
       table(scenarios);
     }
-    console.log(`SCORE ${report.score}`);
+    if (retries > 0) console.log(`RETRIES ${retries} (a headless run hung and was relaunched; samples come only from completed runs)`);
+    if (frameStalls > 0) console.log(`FRAME STALLS ${frameStalls} (headless Chromium produced no frame within ${FRAME_TIMEOUT_MS / 1000}s; those keys are left out of p95)`);
+    const uniqueFailures = [...new Set(failures)];
+    console.log(`WORK CHECKS ${uniqueFailures.length === 0 ? 'OK' : `FAILED (${uniqueFailures.length})`}`);
+    uniqueFailures.forEach((failure) => console.log(`  - ${failure}`));
+    console.log(`SCORE ${uniqueFailures.length === 0 ? report.score : 0}`);
   } finally {
     candidateServer.stop();
     baseServer.stop();
