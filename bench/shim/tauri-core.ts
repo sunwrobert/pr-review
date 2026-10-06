@@ -14,6 +14,8 @@ const calls: Record<string, number> = {};
 Object.assign(window, { __shimCalls: calls });
 
 const resolvedThreads = new Set<string>();
+const CONFLICT_ON_MERGE = (new URLSearchParams(location.search).get('conflictOnMerge') ?? '').split(',').filter(Boolean).map(Number);
+const lateConflicts = new Set<number>();
 const THREAD_BODIES = ['Can we keep the old behaviour behind a flag until the migration lands?', 'Nit: this name reads as a boolean; maybe <code>shouldAbort</code>?', 'Does this need a test for the empty-query case?'];
 function threadsOf(pull: FixturePull): { id: string; isResolved: boolean; isOutdated: boolean; path: string; line: number; originalLine: number; viewerCanResolve: boolean; comments: { totalCount: number; nodes: unknown[] } }[] {
   const count = IS_DEMO ? (pull.title.startsWith('perf(search)') ? 3 : pull.number % 4 === 0 ? 1 : 0) : pull.number % 3;
@@ -36,7 +38,7 @@ function threadsOf(pull: FixturePull): { id: string; isResolved: boolean; isOutd
 }
 
 function mergeStateOf(pull: FixturePull): Record<string, unknown> {
-  const conflicted = IS_DEMO ? DEMO_CONFLICTS.has(pull.id) : pull.number % 13 === 0;
+  const conflicted = lateConflicts.has(pull.number) || (IS_DEMO ? DEMO_CONFLICTS.has(pull.id) : pull.number % 13 === 0);
   const failing = pull.commits.nodes[0]?.commit.statusCheckRollup?.state === 'FAILURE';
   const status = conflicted ? 'DIRTY' : pull.isDraft ? 'DRAFT' : failing ? 'UNSTABLE' : pull.reviewDecision === 'APPROVED' ? 'CLEAN' : 'BLOCKED';
   const rollup = pull.commits.nodes[0]?.commit.statusCheckRollup?.state;
@@ -73,6 +75,10 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     await new Promise((resolve) => setTimeout(resolve, Number(new URLSearchParams(location.search).get('mergeMs') ?? 0)));
     const failing = (new URLSearchParams(location.search).get('failMerge') ?? '').split(',').filter(Boolean).map(Number);
     if (failing.includes(Number(args.number))) throw new Error('Pull request is not mergeable: required status check "ci" is failing');
+    if (CONFLICT_ON_MERGE.includes(Number(args.number))) {
+      lateConflicts.add(Number(args.number));
+      throw new Error('GraphQL: Pull Request is not mergeable (mergePullRequest)');
+    }
     return 'ok';
   },
   open_in_browser: (args) => { (window as unknown as { __opened: string[] }).__opened = [...((window as unknown as { __opened?: string[] }).__opened ?? []), String(args.url)]; return undefined; },

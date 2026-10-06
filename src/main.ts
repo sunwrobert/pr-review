@@ -1436,7 +1436,15 @@ function toggleCurrentFile(): void {
   if (file != null) diffView.toggle(file.id);
 }
 
-const mergeStateCache = new Map<string, { updatedAt: string; state: MergeState }>();
+const mergeStateCache = new Map<string, { updatedAt: string; fetchedAt: number; state: MergeState }>();
+/** A PR's updatedAt does not change when its base branch moves, so conflicts can appear on an untouched PR; re-check after this long. */
+const MERGE_STATE_MAX_AGE_MS = 3 * 60_000;
+
+function cachedMergeState(pull: PullRequest): MergeState | null {
+  const cached = mergeStateCache.get(pull.id);
+  if (cached == null || cached.updatedAt !== pull.updatedAt || Date.now() - cached.fetchedAt > MERGE_STATE_MAX_AGE_MS) return null;
+  return cached.state;
+}
 
 const AI_CONCURRENCY = 4;
 const AI_CACHE_KEY = 'jevReadiness.v2';
@@ -1519,7 +1527,7 @@ function applyMergeStates(kind: QueueKind, states: MergeState[]): void {
   const updated = pulls.map((pull) => {
     const mergeState = byId.get(pull.id);
     if (mergeState == null) return pull;
-    if (mergeState.mergeStateStatus !== 'UNKNOWN') mergeStateCache.set(pull.id, { updatedAt: pull.updatedAt, state: mergeState });
+    if (mergeState.mergeStateStatus !== 'UNKNOWN') mergeStateCache.set(pull.id, { updatedAt: pull.updatedAt, fetchedAt: Date.now(), state: mergeState });
     return { ...pull, mergeable: mergeState.mergeable, mergeStateStatus: mergeState.mergeStateStatus, openThreads: mergeState.openThreads, failingRequired: mergeState.failingRequired, failingOptional: mergeState.failingOptional };
   });
   queueCache.set(kind, updated);
@@ -1540,7 +1548,7 @@ function applyMergeStates(kind: QueueKind, states: MergeState[]): void {
 const MERGE_STATE_RETRY_MS = [2_000, 5_000, 10_000, 20_000];
 
 async function loadMergeStates(kind: QueueKind, pulls: PullRequest[]): Promise<void> {
-  let pending = pulls.filter((pull) => mergeStateCache.get(pull.id)?.updatedAt !== pull.updatedAt).map((pull) => pull.id);
+  let pending = pulls.filter((pull) => cachedMergeState(pull) == null).map((pull) => pull.id);
   for (let attempt = 0; pending.length > 0; attempt += 1) {
     const unknown: string[] = [];
     await fetchMergeStates(pending, (states) => {
@@ -1621,7 +1629,7 @@ function refresh(kind: QueueKind, isForced = false): Promise<void> {
   const pending = fetchQueue(kind)
     .then((pulls) => {
       lastFetchedAt.set(kind, Date.now());
-      const merged = pulls.map((pull) => mergeStateCache.get(pull.id)?.updatedAt === pull.updatedAt ? { ...pull, ...mergeStateCache.get(pull.id)?.state } : pull);
+      const merged = pulls.map((pull) => mergeStateCache.has(pull.id) && mergeStateCache.get(pull.id)?.updatedAt === pull.updatedAt ? { ...pull, ...mergeStateCache.get(pull.id)?.state } : pull);
       queueCache.set(kind, merged);
       renderCounts();
       if (kind === state.kind) applyQueue(merged);
@@ -2079,8 +2087,18 @@ async function runMerge(pull: PullRequest, isQueued: boolean): Promise<string | 
     return null;
   } catch (error) {
     rollbackPending(pull);
+    void recheckMergeState(pull);
     return `#${pull.number}: ${errorMessage(error).split('\n')[0]}`;
   }
+}
+
+/** After a merge is refused, ask GitHub again so a conflict (or any other blocker) shows up right away instead of on a later refresh. */
+async function recheckMergeState(pull: PullRequest): Promise<void> {
+  mergeStateCache.delete(pull.id);
+  const kind = state.kind;
+  await loadMergeStates(kind, [pull]).catch((error: unknown) => console.warn('merge state recheck failed', errorMessage(error)));
+  const fresh = state.pulls.find((candidate) => candidate.id === pull.id);
+  if (fresh != null && isConflicted(fresh) && !isConflicted(pull)) toast(`#${pull.number} now has merge conflicts with ${pull.baseRefName}`, true);
 }
 
 async function bulkMerge(): Promise<void> {
