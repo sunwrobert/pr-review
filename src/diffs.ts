@@ -94,6 +94,10 @@ export class DiffView {
     this.ids = files.map((file) => file.id);
     this.collapsed = new Set(files.filter(shouldStartCollapsed).map((file) => file.id));
     this.view.setItems(files.map((file): CodeViewDiffItem => ({ id: file.id, type: 'diff', fileDiff: file.diff, collapsed: this.collapsed.has(file.id) })));
+  }
+
+  /** Scrolls to the top before new items mount, while the pane is still laid out, so the write never forces a fresh layout. */
+  resetScroll(): void {
     this.root.scrollTop = 0;
   }
 

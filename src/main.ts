@@ -1303,7 +1303,7 @@ function resetScrollForNewPull(pull: PullRequest): void {
   if (lastRenderedPullId === pull.id) return;
   lastRenderedPullId = pull.id;
   dom.descPane.scrollTop = 0;
-  dom.diffRoot.scrollTop = 0;
+  diffView.resetScroll();
   dom.files.scrollTop = 0;
 }
 
@@ -1463,11 +1463,8 @@ function scheduleAiRender(): void {
   cancelAnimationFrame(aiRenderFrame);
   aiRenderFrame = requestAnimationFrame(() => {
     const key = state.selectedId;
-    const before = key == null ? null : virtualList.rowTop(key);
-    const offset = before == null ? null : before - dom.list.scrollTop;
-    renderList();
-    const after = key == null ? null : virtualList.rowTop(key);
-    if (offset != null && after != null) dom.list.scrollTop = after - offset;
+    if (key == null) renderList();
+    else virtualList.preserveOffset(key, renderList);
     const pull = selectedPull();
     if (pull != null) renderDetailMeta(pull);
     renderAiStatus();

@@ -21,6 +21,9 @@ export class VirtualList {
   private highlightedKey: string | null = null;
   private highlightTop: number | null = null;
   private highlightHeight = -1;
+  /** Cached so renders and highlight moves never force a synchronous layout just to read geometry. */
+  private viewportHeight = 0;
+  private scrollTop = 0;
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -35,8 +38,14 @@ export class VirtualList {
     this.highlight.className = 'vl-highlight';
     this.highlight.setAttribute('aria-hidden', 'true');
     root.replaceChildren(this.highlight, this.spacerTop, this.window, this.spacerBottom);
-    root.addEventListener('scroll', () => this.schedule(), { passive: true });
-    new ResizeObserver(() => this.schedule()).observe(root);
+    root.addEventListener('scroll', () => {
+      this.scrollTop = root.scrollTop;
+      this.schedule();
+    }, { passive: true });
+    new ResizeObserver(([entry]) => {
+      this.viewportHeight = entry?.contentRect.height ?? root.clientHeight;
+      this.schedule();
+    }).observe(root);
   }
 
   setRows(rows: VirtualRow[]): void {
@@ -64,9 +73,19 @@ export class VirtualList {
     const top = this.offsets[index] ?? 0;
     const bottom = top + (this.rows[index]?.height ?? 0);
     const stickyOffset = 34;
-    if (top - stickyOffset < this.root.scrollTop) this.root.scrollTop = Math.max(0, top - stickyOffset);
-    else if (bottom > this.root.scrollTop + this.root.clientHeight) this.root.scrollTop = bottom - this.root.clientHeight;
+    const viewport = this.viewport();
+    if (top - stickyOffset < this.scrollTop) this.setScrollTop(Math.max(0, top - stickyOffset));
+    else if (bottom > this.scrollTop + viewport) this.setScrollTop(bottom - viewport);
     this.render();
+  }
+
+  /** Keeps a row at the same on-screen offset across a re-render that moves it. */
+  preserveOffset(key: string, rerender: () => void): void {
+    const before = this.rowTop(key);
+    const offset = before == null ? null : before - this.scrollTop;
+    rerender();
+    const after = this.rowTop(key);
+    if (offset != null && after != null) this.setScrollTop(after - offset);
   }
 
   rowTop(key: string): number | null {
@@ -95,7 +114,7 @@ export class VirtualList {
     const height = this.rows[index]?.height ?? 0;
     const isFirst = this.highlightTop == null;
     const distance = isFirst ? 0 : Math.abs(top - (this.highlightTop ?? 0));
-    const viewport = this.root.clientHeight;
+    const viewport = this.viewport();
     const isOffscreenJump = distance > viewport * 1.5;
     const isInstant = isFirst || isOffscreenJump;
     if (this.highlight.classList.contains('instant') !== isInstant) this.highlight.classList.toggle('instant', isInstant);
@@ -111,6 +130,19 @@ export class VirtualList {
 
   forEachRendered(callback: (element: HTMLElement) => void): void {
     this.window.querySelectorAll<HTMLElement>('[data-key]').forEach(callback);
+  }
+
+  private viewport(): number {
+    if (this.viewportHeight === 0) this.viewportHeight = this.root.clientHeight;
+    return this.viewportHeight;
+  }
+
+  private setScrollTop(value: number): void {
+    const total = this.offsets.at(-1) ?? 0;
+    const clamped = Math.max(0, Math.min(value, Math.max(0, total - this.viewport())));
+    if (Math.abs(clamped - this.scrollTop) < 0.5) return;
+    this.scrollTop = clamped;
+    this.root.scrollTop = clamped;
   }
 
   private schedule(): void {
@@ -131,8 +163,8 @@ export class VirtualList {
 
   private render(): void {
     const total = this.offsets.at(-1) ?? 0;
-    const start = this.findIndex(Math.max(0, this.root.scrollTop - OVERSCAN_PX));
-    const end = Math.min(this.rows.length, this.findIndex(this.root.scrollTop + this.root.clientHeight + OVERSCAN_PX) + 1);
+    const start = this.findIndex(Math.max(0, this.scrollTop - OVERSCAN_PX));
+    const end = Math.min(this.rows.length, this.findIndex(this.scrollTop + this.viewport() + OVERSCAN_PX) + 1);
     const range = `${start}:${end}:${this.rows.length}`;
     if (range === this.renderedRange) return;
     this.renderedRange = range;
