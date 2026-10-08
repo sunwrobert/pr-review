@@ -2919,6 +2919,7 @@ dom.filterBar.addEventListener('click', (event) => {
   if (chip != null) setSmartFilter(chip.dataset.smart as SmartFilter);
 });
 dom.sort.addEventListener('change', () => setSortOrder(dom.sort.value as SortOrder));
+element('toggle-grouping').addEventListener('click', toggleGrouping);
 element('bulk-ready').addEventListener('click', selectReady);
 element('bulk-unready').addEventListener('click', selectUnready);
 element('bulk-clear').addEventListener('click', clearChecked);
