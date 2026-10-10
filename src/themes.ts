@@ -1,3 +1,5 @@
+import { T3_THEMES } from './themes-t3';
+
 export type ThemeMode = 'dark' | 'light';
 
 export interface AppTheme {
@@ -5,6 +7,8 @@ export interface AppTheme {
   name: string;
   mode: ThemeMode;
   diff: string;
+  /** Text on accent fills; white when unset. */
+  accentFg?: string;
   colors: Record<'bg' | 'bgElev' | 'bgHover' | 'bgActive' | 'border' | 'borderSoft' | 'text' | 'text2' | 'text3' | 'text4' | 'accent' | 'ok' | 'bad' | 'wait', string>;
 }
 
@@ -56,6 +60,7 @@ export const THEMES: readonly AppTheme[] = [
   { id: 'vitesse-light', name: 'Vitesse Light', mode: 'light', diff: 'vitesse-light', colors: { bg: '#ffffff', bgElev: '#f7f7f7', bgHover: '#f0f0f0', bgActive: '#eaeaea', border: '#e8e8e8', borderSoft: '#f0f0f0', text: '#393a34', text2: '#4e4f47', text3: '#888883', text4: '#b0b0aa', accent: '#1c6b48', ok: '#1e754f', bad: '#ab5959', wait: '#bda437' } },
   { id: 'github-dark-hc', name: 'GitHub High Contrast', mode: 'dark', diff: 'github-dark-high-contrast', colors: { bg: '#0a0c10', bgElev: '#010409', bgHover: '#151a21', bgActive: '#272b33', border: '#7a828e', borderSoft: '#272b33', text: '#ffffff', text2: '#f0f3f6', text3: '#bdc4cc', text4: '#9ea7b3', accent: '#71b7ff', ok: '#26cd4d', bad: '#ff6a69', wait: '#f0b72f' } },
   { id: 'github-light-hc', name: 'GitHub Light High Contrast', mode: 'light', diff: 'github-light-high-contrast', colors: { bg: '#ffffff', bgElev: '#ffffff', bgHover: '#e7ecf0', bgActive: '#dce2e8', border: '#20252c', borderSoft: '#88929d', text: '#0e1116', text2: '#0e1116', text3: '#4b535d', text4: '#66707b', accent: '#0349b4', ok: '#055d20', bad: '#a0111f', wait: '#744500' } },
+  ...T3_THEMES,
 ];
 
 const THEME_VARIABLES: Record<keyof AppTheme['colors'], string> = {
@@ -73,6 +78,7 @@ export function applyThemeColors(root: HTMLElement, theme: AppTheme): void {
   root.style.colorScheme = theme.mode;
   (Object.keys(THEME_VARIABLES) as (keyof AppTheme['colors'])[]).forEach((key) => root.style.setProperty(THEME_VARIABLES[key], theme.colors[key]));
   root.style.setProperty('--accent-hover', theme.colors.accent);
+  root.style.setProperty('--accent-fg', theme.accentFg ?? '#fff');
   root.style.setProperty('--add', theme.colors.ok);
   root.style.setProperty('--del', theme.colors.bad);
   root.style.setProperty('--toast-bg', theme.colors.bgElev);

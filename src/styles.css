@@ -12,6 +12,7 @@
   --text-4: #62666d;
   --accent: #5e6ad2;
   --accent-hover: #6e79d6;
+  --accent-fg: #fff;
   --ok: #4cb782;
   --bad: #eb5757;
   --wait: #f2c94c;
@@ -109,13 +110,13 @@ i.del, .del { color: var(--del); font-style: normal; }
 .actions { display: flex; gap: 6px; align-items: center; }
 button.ghost, button.primary, .split-button select { height: 28px; padding: 0 10px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--bg-elev); color: var(--text-2); font-weight: 500; font-size: 12.5px; display: inline-flex; align-items: center; white-space: nowrap; }
 button.ghost:hover { background: var(--bg-hover); color: var(--text); }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 button.primary:hover { background: var(--accent-hover); }
-button.primary kbd { background: rgb(255 255 255 / .14); border-color: transparent; color: rgb(255 255 255 / .8); }
+button.primary kbd { background: color-mix(in srgb, var(--accent-fg) 14%, transparent); border-color: transparent; color: color-mix(in srgb, var(--accent-fg) 80%, transparent); }
 button:disabled { opacity: .4; pointer-events: none; }
 .split-button { display: flex; }
 .split-button button.primary { border-radius: var(--radius) 0 0 var(--radius); }
-.split-button select { border-radius: 0 var(--radius) var(--radius) 0; border-left: 0; width: 24px; padding: 0 4px; background: var(--accent); border-color: var(--accent); color: transparent; appearance: none; background-image: linear-gradient(45deg, transparent 50%, #fff 50%), linear-gradient(135deg, #fff 50%, transparent 50%); background-position: 8px 12px, 12px 12px; background-size: 4px 4px; background-repeat: no-repeat; box-shadow: inset 1px 0 0 rgb(255 255 255 / .18); }
+.split-button select { border-radius: 0 var(--radius) var(--radius) 0; border-left: 0; width: 24px; padding: 0 4px; background: var(--accent); border-color: var(--accent); color: transparent; appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--accent-fg) 50%), linear-gradient(135deg, var(--accent-fg) 50%, transparent 50%); background-position: 8px 12px, 12px 12px; background-size: 4px 4px; background-repeat: no-repeat; box-shadow: inset 1px 0 0 rgb(255 255 255 / .18); }
 .split-button select option { color: var(--text); background: var(--bg-elev); }
 
 #pr-body-split { display: flex; flex: 1; min-height: 0; }
@@ -235,7 +236,7 @@ dialog button:focus-visible { outline: 1px solid var(--accent); outline-offset: 
 .check-box { width: 14px; height: 14px; border-radius: 4px; border: 1px solid #3a3d45; background: var(--bg); opacity: 0; transition: opacity .08s; display: grid; place-items: center; }
 #pr-list li:hover .check-box, #pr-list.selecting .check-box, #pr-list li.checked .check-box { opacity: 1; }
 #pr-list li.checked .check-box { background: var(--accent); border-color: var(--accent); }
-#pr-list li.checked .check-box::after { content: ''; width: 7px; height: 4px; border: 1.6px solid #fff; border-top: 0; border-right: 0; transform: translateY(-1px) rotate(-45deg); }
+#pr-list li.checked .check-box::after { content: ''; width: 7px; height: 4px; border: 1.6px solid var(--accent-fg); border-top: 0; border-right: 0; transform: translateY(-1px) rotate(-45deg); }
 #pr-list li.checked { background: rgb(94 106 210 / .10); }
 #pr-list li.checked.selected { background: rgb(94 106 210 / .18); }
 
@@ -337,7 +338,7 @@ img { -webkit-user-drag: none; }
 #lightbox[open] { display: flex; flex-direction: column; }
 .lb-top { display: flex; align-items: center; justify-content: flex-end; gap: 14px; height: 48px; padding: 0 16px 0 20px; flex: none; }
 .lb-footer { flex: none; display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 64px; padding: 0 80px 18px; }
-.lb-counter { flex: none; color: #fff; background: var(--accent); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; padding: 4px 10px; border-radius: 999px; letter-spacing: .02em; }
+.lb-counter { flex: none; color: var(--accent-fg); background: var(--accent); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; padding: 4px 10px; border-radius: 999px; letter-spacing: .02em; }
 .lb-caption { color: var(--text); font-size: 17px; font-weight: 600; letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(900px, 70vw); text-shadow: 0 1px 12px rgb(0 0 0 / .6); }
 .lb-actions { display: flex; gap: 6px; }
 .lb-actions button { height: 28px; padding: 0 10px; border-radius: var(--radius); border: 1px solid var(--border); background: #1b1c1f; color: var(--text-2); font-size: 12.5px; }
@@ -408,7 +409,7 @@ img { -webkit-user-drag: none; }
 :root[data-theme=light] .queue-pill { color: #8a6508; }
 :root[data-theme=light] .lb-actions button { background: #ffffff; color: var(--text-2); }
 :root[data-theme=light] diffs-container { --diffs-light-bg: #ffffff; }
-:root[data-theme=light] button.primary kbd { background: rgb(255 255 255 / .22); border-color: transparent; color: #fff; }
+:root[data-theme=light] button.primary kbd { background: color-mix(in srgb, var(--accent-fg) 22%, transparent); border-color: transparent; color: var(--accent-fg); }
 :root[data-theme=light] .split-button select { color: transparent; }
 :root[data-theme=light] #toast { box-shadow: 0 16px 48px rgb(0 0 0 / .14); }
 
@@ -668,7 +669,8 @@ diffs-container { --diffs-dark-bg: var(--bg); --diffs-light-bg: var(--bg); }
 #close-dialog textarea { width: 100%; min-height: 72px; max-height: 40vh; resize: vertical; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: 13px/1.55 "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif; outline: none; }
 #close-dialog textarea:focus { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
 #close-dialog .close-note { margin: 8px 0 14px; font-size: 12px; }
-button.primary.danger { background: var(--bad); border-color: var(--bad); }
+button.primary.danger { background: var(--bad); border-color: var(--bad); color: #fff; }
+button.primary.danger kbd { background: rgb(255 255 255 / .18); color: rgb(255 255 255 / .85); }
 button.primary.danger:hover { background: color-mix(in srgb, var(--bad) 85%, #000); }
 button.primary.danger:disabled { opacity: .5; }
 #comment-dialog { width: 600px; max-width: 90vw; }
