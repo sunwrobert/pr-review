@@ -664,6 +664,13 @@ diffs-container { --diffs-dark-bg: var(--bg); --diffs-light-bg: var(--bg); }
 #pr-list li.selected:hover { background: color-mix(in srgb, var(--accent) 26%, var(--bg)); }
 #pr-list li.checked.selected, #pr-list.visual li.checked.selected { background: color-mix(in srgb, var(--accent) 30%, var(--bg)); }
 .file.active, :root[data-theme=light] .file.active { background: color-mix(in srgb, var(--accent) 20%, var(--bg)); color: var(--text); }
+#close-dialog { width: 560px; max-width: 90vw; }
+#close-dialog textarea { width: 100%; min-height: 72px; max-height: 40vh; resize: vertical; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: 13px/1.55 "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif; outline: none; }
+#close-dialog textarea:focus { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
+#close-dialog .close-note { margin: 8px 0 14px; font-size: 12px; }
+button.primary.danger { background: var(--bad); border-color: var(--bad); }
+button.primary.danger:hover { background: color-mix(in srgb, var(--bad) 85%, #000); }
+button.primary.danger:disabled { opacity: .5; }
 #comment-dialog { width: 600px; max-width: 90vw; }
 #comment-dialog textarea { width: 100%; min-height: 140px; max-height: 50vh; resize: vertical; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: 13px/1.55 "Inter Variable", Inter, -apple-system, BlinkMacSystemFont, system-ui, sans-serif; outline: none; }
 #comment-dialog textarea:focus { border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }

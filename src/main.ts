@@ -11,7 +11,7 @@ import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, is
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
-import { approvePull, commentOnPull, messageDevinSession, fetchViewerLogin, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchQueue, type MergeState, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
+import { approvePull, closePull, commentOnPull, messageDevinSession, fetchViewerLogin, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchQueue, type MergeState, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
 import { DiffView, parseDiff, type DiffStyle, type ParsedFile } from './diffs';
 import { sanitizeHtml } from './sanitize';
 import { CommandRegistry, renderShortcut, type Command } from './commands';
@@ -81,6 +81,14 @@ const dom = {
   bulkCount: element('bulk-count'),
   bulkMerge: element<HTMLButtonElement>('bulk-merge'),
   bulkApprove: element<HTMLButtonElement>('bulk-approve'),
+  bulkClose: element<HTMLButtonElement>('bulk-close'),
+  closePull: element<HTMLButtonElement>('close-pull'),
+  closeDialog: element<HTMLDialogElement>('close-dialog'),
+  closeTitle: element('close-title'),
+  closeList: element<HTMLOListElement>('close-list'),
+  closeComment: element<HTMLTextAreaElement>('close-comment'),
+  closeConfirm: element<HTMLButtonElement>('close-confirm'),
+  closeConfirmLabel: element('close-confirm-label'),
   commentDialog: element<HTMLDialogElement>('comment-dialog'),
   commentTitle: element('comment-title'),
   commentBody: element<HTMLTextAreaElement>('comment-body'),
@@ -142,7 +150,7 @@ const TOAST_ICONS: Record<ToastTone, string> = {
   success: icon('circleCheck'),
   error: icon('circleAlert'),
 };
-const SUCCESS_PATTERN = /^(approved|merged|queued|copied|added|#\d+ (queued|added))/i;
+const SUCCESS_PATTERN = /^(approved|merged|closed|queued|copied|added|#\d+ (queued|added))/i;
 
 function toast(message: string, isError = false): void {
   const tone: ToastTone = isError ? 'error' : SUCCESS_PATTERN.test(message) ? 'success' : 'info';
@@ -1133,6 +1141,7 @@ function renderDetailMeta(pull: PullRequest): void {
     `<span class="status-summary" title="${escapeHtml(summary)}">${statusIcon(pull)}</span>`,
   ].join('');
   dom.merge.disabled = pull.isDraft || pull.mergeable === 'CONFLICTING' || pull.queueEntry != null || leaving.has(pull.id);
+  dom.closePull.disabled = leaving.has(pull.id);
   const isOwn = isOwnPull(pull);
   dom.approve.disabled = isOwn;
   dom.approve.title = isOwn ? 'You can’t approve your own pull request' : 'Approve  A';
@@ -1882,6 +1891,7 @@ function renderBulkBar(): void {
   dom.bulkCount.innerHTML = `<b>${checked.length}</b> selected${readyCount < checked.length ? ` · <span class="warn">${checked.length - readyCount} not ready</span>` : ''}`;
   dom.bulkMerge.disabled = checked.every((pull) => pull.isDraft || pull.mergeable === 'CONFLICTING');
   dom.bulkApprove.disabled = checked.every(isOwnPull);
+  dom.bulkClose.disabled = checked.every((pull) => leaving.has(pull.id));
   dom.bulkApprove.title = dom.bulkApprove.disabled ? 'You can’t approve your own pull requests' : 'Approve selected  ⇧A';
 }
 
@@ -2181,6 +2191,63 @@ async function mergeSelected(): Promise<void> {
   const failure = await runMerge(pull, isQueued);
   if (failure != null) toast(`Merge #${pull.number} failed: ${failure.replace(/^#\d+: /, '')}`, true);
   else toast(isQueued ? `#${pull.number} added to the merge queue` : `Merged #${pull.number}`);
+  void refresh(state.kind);
+}
+
+/** Pulls ⇧W acts on: every checked pull, or the selected one when nothing is checked. */
+function closeTargets(): PullRequest[] {
+  const scope = state.checkedIds.size > 0 ? checkedPulls() : [selectedPull()].filter((pull): pull is PullRequest => pull != null);
+  return scope.filter((pull) => !leaving.has(pull.id));
+}
+
+let closingPulls: PullRequest[] = [];
+
+function openCloseDialog(): void {
+  closingPulls = closeTargets();
+  if (closingPulls.length === 0) return;
+  const [only] = closingPulls;
+  const count = closingPulls.length;
+  dom.closeTitle.textContent = count === 1 && only != null ? `Close #${only.number}?` : `Close ${count} pull requests?`;
+  dom.closeConfirmLabel.textContent = count === 1 ? 'Close' : `Close ${count}`;
+  dom.closeList.innerHTML = closingPulls.map((pull) => `<li>${statusIcon(pull)}<span class="id">#${pull.number}</span><span class="t">${escapeHtml(pull.title)}</span><span class="muted">${escapeHtml(pull.repository.nameWithOwner)}</span></li>`).join('');
+  dom.closeComment.value = '';
+  dom.closeConfirm.disabled = false;
+  dom.closeDialog.showModal();
+  dom.closeComment.focus();
+}
+
+async function runClose(pull: PullRequest, comment: string): Promise<string | null> {
+  markPending(pull, 'Closing…');
+  try {
+    await closePull(pull, comment);
+    markLeaving(pull, 'Closed');
+    return null;
+  } catch (error) {
+    rollbackPending(pull);
+    return `#${pull.number}: ${errorMessage(error).split('\n')[0]}`;
+  }
+}
+
+async function confirmClose(): Promise<void> {
+  const pulls = closingPulls;
+  if (pulls.length === 0 || dom.closeConfirm.disabled) return;
+  const comment = dom.closeComment.value.trim();
+  closingPulls = [];
+  dom.closeDialog.close();
+  if (pulls.some((pull) => state.checkedIds.has(pull.id))) clearChecked();
+  const failures: string[] = [];
+  const work = [...pulls];
+  const worker = async (): Promise<void> => {
+    for (let next = work.shift(); next != null; next = work.shift()) {
+      const failure = await runClose(next, comment);
+      if (failure != null) failures.push(failure);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(MERGE_CONCURRENCY, pulls.length) }, worker));
+  const done = pulls.length - failures.length;
+  const [only] = pulls;
+  if (pulls.length === 1 && only != null) toast(failures.length === 0 ? `Closed #${only.number}` : `Close ${failures[0] ?? ''}`.replace(/^Close (#\d+): /, 'Close $1 failed: '), failures.length > 0);
+  else toast(failures.length === 0 ? `Closed ${done} pull requests` : `Closed ${done}, failed ${failures.length} — ${failures.join(' · ')}`, failures.length > 0);
   void refresh(state.kind);
 }
 
@@ -2765,6 +2832,7 @@ const COMMANDS: Command[] = [
   { id: 'open-threads', section: 'Pull request', title: 'Jump to open review threads', aliases: 'unresolved comments threads review feedback resolve', keys: ['⇧c'], run: focusFirstOpenThread, isEnabled: hasPull },
   { id: 'comment', section: 'Pull request', title: 'Write a comment', aliases: 'reply message mention devin note', keys: ['c'], run: openCommentDialog, isEnabled: hasPull },
   { id: 'approve', section: 'Pull request', title: 'Approve', aliases: 'lgtm review accept', keys: ['a'], run: () => void approveSelected(), isEnabled: () => { const pull = selectedPull(); return pull != null && !isOwnPull(pull); } },
+  { id: 'close', section: 'Pull request', title: 'Close (all selected when several are checked)', aliases: 'close reject abandon discard decline won\'t merge', keys: ['⇧w'], run: openCloseDialog, isEnabled: () => closeTargets().length > 0 },
   { id: 'merge', section: 'Pull request', title: 'Merge (all selected when several are checked)', aliases: 'squash ship land queue', keys: ['⌘↵', 'm'], run: () => void (state.checkedIds.size > 0 ? bulkMerge() : mergeSelected()), isEnabled: () => hasPull() || state.checkedIds.size > 0 },
   { id: 'fix-prompt', section: 'Pull request', title: 'Needs attention → copy agent prompt', aliases: 'triage unapproved broken red failing ci conflict agent devin claude codex prompt clipboard review', keys: ['⇧x'], run: openTriage },
   { id: 'open', section: 'Pull request', title: 'Open on GitHub', aliases: 'browser link url web', keys: ['o', '⌘o', 'g o'], run: openSelectedOnGitHub, isEnabled: hasPull },
@@ -2804,7 +2872,7 @@ function handleSequence(event: KeyboardEvent): boolean {
 }
 
 document.addEventListener('keydown', (event) => {
-  if ((event.isComposing && !event.altKey) || lightbox.isOpen || dom.confirm.open || dom.help.open || dom.bulkConfirm.open || dom.triage.open || themePicker.isOpen || dom.commentDialog.open) return;
+  if ((event.isComposing && !event.altKey) || lightbox.isOpen || dom.confirm.open || dom.help.open || dom.bulkConfirm.open || dom.closeDialog.open || dom.triage.open || themePicker.isOpen || dom.commentDialog.open) return;
   const target = event.target;
   const isTyping = target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement || (target instanceof HTMLElement && target.isContentEditable);
   if (isTyping && (event.key === 'Escape' || (event.key === 'Enter' && !event.metaKey))) {
@@ -2925,6 +2993,16 @@ element('bulk-unready').addEventListener('click', selectUnready);
 element('bulk-clear').addEventListener('click', clearChecked);
 dom.bulkApprove.addEventListener('click', () => void bulkApprove());
 dom.bulkMerge.addEventListener('click', () => void bulkMerge());
+dom.bulkClose.addEventListener('click', openCloseDialog);
+dom.closePull.addEventListener('click', openCloseDialog);
+dom.closeConfirm.addEventListener('click', () => void confirmClose());
+element('close-cancel').addEventListener('click', () => dom.closeDialog.close());
+dom.closeDialog.addEventListener('keydown', (event) => {
+  if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  void confirmClose();
+});
 syncPaneButtons();
 dom.approve.addEventListener('click', () => void approveSelected());
 dom.merge.addEventListener('click', () => void (state.checkedIds.size > 0 ? bulkMerge() : mergeSelected()));

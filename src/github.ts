@@ -149,6 +149,10 @@ export function approvePull(pull: PullRequest): Promise<string> {
   return invoke<string>('approve', { repo: pull.repository.nameWithOwner, number: pull.number });
 }
 
+export function closePull(pull: PullRequest, comment: string): Promise<string> {
+  return invoke<string>('close', { repo: pull.repository.nameWithOwner, number: pull.number, comment: comment === '' ? null : comment });
+}
+
 interface MergeQueueResponse {
   data?: { repository: { mergeQueue: { url: string } | null } | null };
 }

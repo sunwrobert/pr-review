@@ -71,6 +71,11 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   review_context: () => { throw new Error('offline harness'); },
   readiness: () => { throw new Error('offline harness'); },
   approve: () => 'ok',
+  close: (args) => {
+    const failing = (new URLSearchParams(location.search).get('failClose') ?? '').split(',').filter(Boolean).map(Number);
+    if (failing.includes(Number(args.number))) throw new Error('GraphQL: Resource not accessible by integration (closePullRequest)');
+    return '';
+  },
   merge: async (args) => {
     await new Promise((resolve) => setTimeout(resolve, Number(new URLSearchParams(location.search).get('mergeMs') ?? 0)));
     const failing = (new URLSearchParams(location.search).get('failMerge') ?? '').split(',').filter(Boolean).map(Number);

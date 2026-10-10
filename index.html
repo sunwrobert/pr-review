@@ -48,6 +48,7 @@
           <button id="bulk-ready" class="ghost" title="Select every Ready PR  ⇧R">Ready <kbd>⇧</kbd><kbd>R</kbd></button>
           <button id="bulk-unready" class="ghost" title="Select every PR that needs attention  ⇧U">Unready <kbd>⇧</kbd><kbd>U</kbd></button>
           <button id="bulk-clear" class="ghost" title="Clear selection  Esc or ⌫">Clear <kbd>⌫</kbd></button>
+          <button id="bulk-close" class="ghost" title="Close selected  ⇧W">Close <kbd>⇧</kbd><kbd>W</kbd></button>
           <button id="bulk-approve" class="ghost" title="Approve selected  ⇧A">Approve <kbd>⇧</kbd><kbd>A</kbd></button>
           <button id="bulk-merge" class="primary" title="Merge selected  ⌘↵">Merge <kbd>⌘</kbd><kbd>↵</kbd></button>
         </div>
@@ -69,6 +70,7 @@
               <button id="threads-button" class="ghost icon-action threads-button" title="Open review threads  ⇧C" disabled><i data-icon="threads"></i><span class="threads-badge" hidden></span><kbd class="icon-kbd">⇧</kbd><kbd class="icon-kbd">C</kbd></button>
               <button id="comment-button" class="ghost icon-action" title="Write a comment  C"><i data-icon="comment"></i><kbd class="icon-kbd">C</kbd></button>
               <button id="approve" class="ghost icon-action" title="Approve  A"><i data-icon="check"></i><kbd class="icon-kbd">A</kbd></button>
+              <button id="close-pull" class="ghost icon-action" title="Close pull request  ⇧W"><i data-icon="circleX"></i><kbd class="icon-kbd">⇧</kbd><kbd class="icon-kbd">W</kbd></button>
               <button id="merge" class="primary merge-icon" title="Squash and merge  ⌘↵"></button>
               <button class="ghost icon-action" id="open-preview" title="Open preview deployment  P" disabled><i data-icon="preview"></i><kbd class="icon-kbd">P</kbd></button>
               <button class="ghost icon-action" id="open-devin" title="Open Devin session  D" disabled><svg class="devin-logo" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M5.9 1.6 8.3 3v2.8L5.9 7.2 3.5 5.8V3zM11.1 4.6l2.4 1.4v2.8l-2.4 1.4-2.4-1.4V6zM5.9 8.8l2.4 1.4V13l-2.4 1.4L3.5 13v-2.8z"/><path d="M8.2 5.7 8.9 6.2M8.2 10.3 8.9 9.8" stroke="currentColor" stroke-width="1.2"/></svg><kbd class="icon-kbd">D</kbd></button>
@@ -119,6 +121,19 @@
         <menu>
           <button value="cancel" class="ghost">Cancel <kbd>esc</kbd></button>
           <button value="ok" class="primary" autofocus>Merge <kbd>↵</kbd></button>
+        </menu>
+      </form>
+    </dialog>
+
+    <dialog id="close-dialog">
+      <form method="dialog">
+        <div class="dialog-title" id="close-title"></div>
+        <ol id="close-list" class="bulk-list"></ol>
+        <textarea id="close-comment" rows="3" placeholder="Optional comment, posted before closing (markdown, @mentions work)" spellcheck="true"></textarea>
+        <p class="muted close-note">The branch is kept, and you can reopen the PR on GitHub.</p>
+        <menu>
+          <button value="cancel" class="ghost" type="button" id="close-cancel">Cancel <kbd>esc</kbd></button>
+          <button value="ok" class="primary danger" type="button" id="close-confirm"><span id="close-confirm-label">Close</span> <kbd>⌘</kbd><kbd>↵</kbd></button>
         </menu>
       </form>
     </dialog>

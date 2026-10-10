@@ -26,7 +26,8 @@ A fast, keyboard-first macOS app for reviewing and merging GitHub pull requests.
 - **Conversation:** PR comments and reviews appear under the description, humans and bots alike (Devin, Perry, GitHub Actions…), with review verdicts highlighted. `⇧B` hides bot comments.
 - **Merge queue:** PRs already in a queue show a yellow marker with their position, and queued merges skip the confirmation.
 - **Themes:** press `T` for a live-preview picker with 45 themes grouped into Dark (29) and Light (16), or follow macOS. Includes Catppuccin, Tokyo Night, Dracula, One Dark/Light, GitHub (dark, dimmed, light, high contrast), VS Code Dark+/Light+, Nord, Gruvbox, Rosé Pine (main, Moon, Dawn), Solarized, Ayu, Everforest, Kanagawa, Material, Night Owl, Monokai, Poimandres, Synthwave '84, Vitesse, Min and Vesper. Diff syntax colours use the matching editor theme.
-- **Bulk actions:** select with `E` / `⇧J` / `⇧R`, then approve or merge in sequence with per-PR error reporting.
+- **Close:** `⇧W` (or the ⊗ button in the top bar, or **Close** in the bulk bar) closes the current PR, or every checked one, after a confirmation that lists them. An optional comment is posted first; the branch is kept.
+- **Bulk actions:** select with `E` / `⇧J` / `⇧R`, then approve, merge or close in sequence with per-PR error reporting.
 - **Keyboard:** Linear-style single keys, VS Code chords, and vim motions. `?` lists every shortcut.
 
 ## How it talks to GitHub
@@ -112,7 +113,7 @@ Vim motions work the same in every pane; the modifier picks the pane.
 | Files | `N` or `]c`/`[c` next/prev file · `X` collapse · `S` split/unified |
 | Filters | `⇧T` group related work · `⌥1` Ready · `⌥4` Unready · `⌥0` All (Small `⌥2`, Recent `⌥3`, Tested `⌥5`) · `⇧S` sort · `⇧X` fix with agent · `⇧U` select unready · `⇧R` select ready |
 | Select | `⇧V` visual mode (then `J`/`K`) · `E` toggle · `⇧J`/`⇧K` extend · `⇧R` all ready · `⇧U` all unready · `⌘A` all · `⌫` or `Esc` clear |
-| Act | `⇧X` copy an agent prompt to fix every PR with conflicts or failing checks (or just the selected ones) · `O` open on GitHub (in Chrome) · `A` approve · `⌘↵` merge (all selected when several are checked) · `⇧A` bulk approve · `⌘↵` bulk merge |
+| Act | `⇧X` copy an agent prompt to fix every PR with conflicts or failing checks (or just the selected ones) · `O` open on GitHub (in Chrome) · `A` approve · `⌘↵` merge (all selected when several are checked) · `⇧W` close (same) · `⇧A` bulk approve · `⌘↵` bulk merge |
 | Layout | `T` theme picker · `⌘B` PR list · `1` review · `2` diff focus · `3` read description · `⌘.` focus |
 | Lightbox | `I` open first media · `H`/`L` or `J`/`K` or `←`/`→` cycle · `gg`/`G` first/last · `⌃D`/`⌃U` skip half · `Z` zoom · `O` open · `Q`/`Esc` close |
 | General | `/` filter PRs · `⌘F` find in this PR (`↵`/`⇧↵` next/prev) · `?` shortcuts · `R` refresh |

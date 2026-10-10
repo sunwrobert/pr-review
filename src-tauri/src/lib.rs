@@ -272,6 +272,21 @@ async fn approve(repo: String, number: u64) -> Result<String, String> {
 const MAX_COMMENT_BYTES: usize = 65_000;
 
 #[tauri::command]
+async fn close(repo: String, number: u64, comment: Option<String>) -> Result<String, String> {
+    validate_repo(&repo)?;
+    let number = number.to_string();
+    let comment = comment.filter(|body| !body.trim().is_empty());
+    if comment.as_ref().is_some_and(|body| body.len() > MAX_COMMENT_BYTES) {
+        return Err("comment must be at most 65000 bytes".to_string());
+    }
+    let mut args = vec!["pr", "close", number.as_str(), "-R", repo.as_str()];
+    if let Some(body) = comment.as_deref() {
+        args.extend(["--comment", body]);
+    }
+    gh(&args).await
+}
+
+#[tauri::command]
 async fn comment(repo: String, number: u64, body: String) -> Result<String, String> {
     validate_repo(&repo)?;
     if body.trim().is_empty() || body.len() > MAX_COMMENT_BYTES {
@@ -527,7 +542,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, viewer, comment, message_devin, threads, set_thread_resolved, reply_to_thread, merge_queue, merge_states, conversation, body, diff, approve, merge, open_in_browser, review_context, readiness_available, readiness])
+        .invoke_handler(tauri::generate_handler![queue, viewer, comment, message_devin, threads, set_thread_resolved, reply_to_thread, merge_queue, merge_states, conversation, body, diff, approve, merge, close, open_in_browser, review_context, readiness_available, readiness])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }
