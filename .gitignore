@@ -12,3 +12,4 @@ bench/dist
 .bench-check.log
 bench/dist-base
 bench/.base-src
+.tmp/
