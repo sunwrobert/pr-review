@@ -561,6 +561,13 @@ button, .chip, .file, #pr-list li { touch-action: manipulation; }
 .triage-dot { width: 8px; height: 8px; border-radius: 50%; }
 .triage-section.tone-bad .triage-dot { background: var(--bad); }
 .triage-section.tone-wait .triage-dot { background: var(--wait); }
+.triage-section.tone-draft .triage-dot { background: none; border: 1.5px dashed var(--text-3); width: 9px; height: 9px; }
+.triage-keys { font-size: 11.5px; margin: -6px 0 12px; line-height: 1.9; }
+.triage-keys kbd { margin-left: 0; }
+.triage-key { margin-left: auto; }
+.triage-head, .triage-row { border-radius: 6px; }
+.triage-head { padding: 2px 6px; margin: 0 -6px; }
+.triage-head.cursor, .triage-row.cursor { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 70%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .triage-count { color: var(--text-3); font-weight: 500; font-variant-numeric: tabular-nums; }
 .triage-section .bulk-list { margin: 6px 0 0; max-height: 200px; }
 .triage-section .bulk-list li { display: block; padding: 0; }

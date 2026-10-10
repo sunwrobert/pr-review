@@ -153,7 +153,8 @@
     <dialog id="triage">
       <form method="dialog">
         <div class="dialog-title" id="triage-title"></div>
-        <p class="muted triage-sub">Everything that is conflicted, failing, blocked or not approved. Untick a PR or a whole group to leave it out (<kbd>A</kbd> toggles all), then copy the prompt for any agent, or send each PR's own Devin session the message below (empty sends “Fix CI and merge conflicts if any”).</p>
+        <p class="muted triage-sub">Conflicted, failing, blocked or unapproved PRs, plus drafts (unpicked by default). Copy one agent prompt, or message each PR's Devin session. An empty message asks drafts to finish and mark themselves ready, and the rest to fix CI and conflicts.</p>
+        <p class="triage-keys muted"><kbd>J</kbd><kbd>K</kbd> move · <kbd>Space</kbd> toggle · <kbd>1</kbd>–<kbd>9</kbd> toggle group · <kbd>⇧</kbd><kbd>1</kbd>–<kbd>9</kbd> only that group · <kbd>D</kbd> drafts · <kbd>A</kbd> all · <kbd>N</kbd> none · <kbd>I</kbd> invert · <kbd>M</kbd> message</p>
         <div id="triage-sections" class="triage-sections"></div>
         <label class="triage-prompt"><span>Message for each Devin session</span><textarea id="triage-message" rows="2" spellcheck="true" placeholder="Fix CI and merge conflicts if any"></textarea></label>
         <menu>

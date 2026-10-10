@@ -7,7 +7,7 @@ import { findInDiff, findInDom, type FindHit } from './find-in-pr';
 import { applyPastedOrder, parsePastedOrder, type PastedOrder } from './pasted-order';
 import { watchKbdGlyphs } from './kbd-glyphs';
 import { animateDialogCancel, flash, glideScrollBy, glideScrollTo, setVisibleWithMotion } from './motion';
-import { ATTENTION_META, ATTENTION_ORDER, attentionReasons, buildAgentPrompt, isConflicted, isFailing, needsAttention, prStatus, type AttentionReason } from './status';
+import { buildAgentPrompt, isConflicted, isFailing, isTriageCandidate, needsAttention, prStatus, TRIAGE_META, TRIAGE_ORDER, triageReasons, type TriageReason } from './status';
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
@@ -2316,25 +2316,40 @@ function isTested(pull: PullRequest): boolean {
 
 let triagePulls: PullRequest[] = [];
 const triageExcluded = new Set<string>();
+let triageCursor = 0;
+let triageMessageDraft = '';
+const DRAFT_DEVIN_MESSAGE = 'Finish this PR, make sure CI passes and there are no merge conflicts, then mark it ready for review with `gh pr ready`';
 
-function triageIncluded(): Set<AttentionReason> {
-  return new Set(ATTENTION_ORDER.filter((reason) => triagePulls.some((pull) => !triageExcluded.has(pull.id) && attentionReasons(pull).includes(reason))));
+const pullsIn = (reason: TriageReason): PullRequest[] => triagePulls.filter((pull) => triageReasons(pull).includes(reason));
+const triageSectionReasons = (): TriageReason[] => TRIAGE_ORDER.filter((reason) => pullsIn(reason).length > 0);
+
+function triageIncluded(): Set<TriageReason> {
+  return new Set(TRIAGE_ORDER.filter((reason) => triagePulls.some((pull) => !triageExcluded.has(pull.id) && triageReasons(pull).includes(reason))));
 }
 
 function triageTargets(): PullRequest[] {
   return triagePulls.filter((pull) => !triageExcluded.has(pull.id));
 }
 
+/** Message for one pull when the box is empty: drafts are asked to finish and go ready, the rest to fix CI and conflicts. */
+function triageDefaultMessage(pull: PullRequest): string {
+  return pull.isDraft ? DRAFT_DEVIN_MESSAGE : BULK_FIX_MESSAGE;
+}
+
 function renderTriageSummary(): void {
-  const count = triageTargets().length;
+  const targets = triageTargets();
+  const count = targets.length;
   const plural = count === 1 ? '' : 's';
   dom.triageCopy.disabled = count === 0;
   dom.triageCopy.firstChild!.textContent = `Copy prompt for ${count} PR${plural} `;
   dom.triageDevin.disabled = count === 0;
   element('triage-devin-label').textContent = `Send to ${count} Devin session${plural}`;
+  const hasDrafts = targets.some((pull) => pull.isDraft);
+  const hasOthers = targets.some((pull) => !pull.isDraft);
+  dom.triageMessage.placeholder = hasDrafts && hasOthers ? `${BULK_FIX_MESSAGE} · drafts: finish and mark ready for review` : hasDrafts ? 'Finish, get CI green, then mark ready for review' : BULK_FIX_MESSAGE;
   dom.triage.querySelectorAll<HTMLInputElement>('input[data-pull]').forEach((input) => (input.checked = !triageExcluded.has(input.dataset.pull ?? '')));
   dom.triage.querySelectorAll<HTMLInputElement>('input[data-reason]').forEach((input) => {
-    const ids = triagePulls.filter((pull) => attentionReasons(pull).includes(input.dataset.reason as AttentionReason)).map((pull) => pull.id);
+    const ids = pullsIn(input.dataset.reason as TriageReason).map((pull) => pull.id);
     const picked = ids.filter((id) => !triageExcluded.has(id)).length;
     input.checked = picked === ids.length;
     input.indeterminate = picked > 0 && picked < ids.length;
@@ -2347,42 +2362,109 @@ function setTriagePicked(ids: readonly string[], isPicked: boolean): void {
   renderTriageSummary();
 }
 
-function openTriage(): void {
-  const scope = state.checkedIds.size > 0 ? checkedPulls() : state.pulls;
-  triagePulls = scope.filter(needsAttention);
+function invertTriagePicks(): void {
+  const picked = triageTargets().map((pull) => pull.id);
   triageExcluded.clear();
+  setTriagePicked(picked, false);
+}
+
+/** Picks a group if any of it is unpicked, otherwise unpicks it. */
+function toggleTriageGroup(ids: readonly string[]): void {
+  setTriagePicked(ids, ids.some((id) => triageExcluded.has(id)));
+}
+
+function triageStops(): HTMLElement[] {
+  return [...dom.triageSections.querySelectorAll<HTMLElement>('.triage-head, .triage-row')];
+}
+
+function moveTriageCursor(index: number): void {
+  const stops = triageStops();
+  if (stops.length === 0) return;
+  triageCursor = Math.min(stops.length - 1, Math.max(0, index));
+  stops.forEach((stop, position) => stop.classList.toggle('cursor', position === triageCursor));
+  stops[triageCursor]?.scrollIntoView({ block: 'nearest' });
+}
+
+function toggleTriageAtCursor(): void {
+  const input = triageStops()[triageCursor]?.querySelector('input');
+  if (input == null) return;
+  if (input.dataset.pull != null) toggleTriageGroup([input.dataset.pull]);
+  else if (input.dataset.reason != null) toggleTriageGroup(pullsIn(input.dataset.reason as TriageReason).map((pull) => pull.id));
+}
+
+function openTriage(): void {
+  const hasSelection = state.checkedIds.size > 0;
+  const scope = hasSelection ? checkedPulls() : state.pulls;
+  triagePulls = scope.filter(isTriageCandidate);
+  triageExcluded.clear();
+  const attentionCount = triagePulls.filter((pull) => !pull.isDraft).length;
+  if (!hasSelection && attentionCount > 0) triagePulls.filter((pull) => pull.isDraft).forEach((pull) => triageExcluded.add(pull.id));
   if (triagePulls.length === 0) {
-    toast(state.checkedIds.size > 0 ? 'Nothing in the selection needs attention' : 'Every PR is approved, green and conflict-free');
+    toast(hasSelection ? 'Nothing in the selection needs attention' : 'Every PR is approved, green and conflict-free');
     return;
   }
-  dom.triageTitle.textContent = `${triagePulls.length} PR${triagePulls.length === 1 ? '' : 's'} need attention${state.checkedIds.size > 0 ? ' in selection' : ''}`;
-  dom.triageSections.innerHTML = ATTENTION_ORDER.map((reason) => {
-    const pulls = triagePulls.filter((pull) => attentionReasons(pull).includes(reason));
-    if (pulls.length === 0) return '';
-    const meta = ATTENTION_META[reason];
-    const rows = pulls.map((pull) => `<li><label class="triage-row"><input type="checkbox" data-pull="${escapeHtml(pull.id)}" checked />${statusIcon(pull)}<span class="id">#${pull.number}</span><span class="t">${escapeHtml(pull.title)}</span><span class="age">${relativeTime(pull.updatedAt)}</span></label></li>`).join('');
-    return `<section class="triage-section tone-${meta.tone}"><label class="triage-head"><input type="checkbox" data-reason="${reason}" checked /><i class="triage-dot"></i><span>${meta.title}</span><span class="triage-count">${pulls.length}</span></label><ol class="bulk-list">${rows}</ol></section>`;
+  const draftCount = triagePulls.length - attentionCount;
+  const draftNote = draftCount > 0 ? ` · ${draftCount} draft${draftCount === 1 ? '' : 's'}` : '';
+  dom.triageTitle.textContent = `${attentionCount} PR${attentionCount === 1 ? '' : 's'} need attention${draftNote}${hasSelection ? ' in selection' : ''}`;
+  dom.triageSections.innerHTML = triageSectionReasons().map((reason, index) => {
+    const pulls = pullsIn(reason);
+    const meta = TRIAGE_META[reason];
+    const rows = pulls.map((pull) => `<li><label class="triage-row"><input type="checkbox" data-pull="${escapeHtml(pull.id)}" tabindex="-1" />${statusIcon(pull)}<span class="id">#${pull.number}</span><span class="t">${escapeHtml(pull.title)}</span><span class="age">${relativeTime(pull.updatedAt)}</span></label></li>`).join('');
+    const key = index < 9 ? `<kbd class="triage-key">${index + 1}</kbd>` : '';
+    return `<section class="triage-section tone-${meta.tone}"><label class="triage-head"><input type="checkbox" data-reason="${reason}" tabindex="-1" /><i class="triage-dot"></i><span>${meta.title}</span><span class="triage-count">${pulls.length}</span>${key}</label><ol class="bulk-list">${rows}</ol></section>`;
   }).join('');
+  dom.triageMessage.value = triageMessageDraft;
   renderTriageSummary();
   dom.triage.returnValue = '';
   dom.triage.showModal();
   dom.triageCopy.focus();
-  dom.triageMessage.value = triageMessageDraft;
+  moveTriageCursor(0);
 }
 
 dom.triage.addEventListener('change', (event) => {
   const input = event.target as HTMLInputElement;
   if (input.dataset.pull != null) setTriagePicked([input.dataset.pull], input.checked);
-  else if (input.dataset.reason != null) setTriagePicked(triagePulls.filter((pull) => attentionReasons(pull).includes(input.dataset.reason as AttentionReason)).map((pull) => pull.id), input.checked);
+  else if (input.dataset.reason != null) setTriagePicked(pullsIn(input.dataset.reason as TriageReason).map((pull) => pull.id), input.checked);
 });
-let triageMessageDraft = '';
 dom.triageMessage.addEventListener('input', () => (triageMessageDraft = dom.triageMessage.value));
 
+/** Single-key bindings inside the ⇧X dialog while the message box is not focused. */
+function handleTriageKey(event: KeyboardEvent): boolean {
+  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  const reasons = triageSectionReasons();
+  const digit = /^Digit([1-9])$/.exec(event.code)?.[1];
+  if (digit != null) {
+    const reason = reasons[Number(digit) - 1];
+    if (reason == null) return false;
+    if (event.shiftKey) setTriagePicked(triagePulls.map((pull) => pull.id), false);
+    toggleTriageGroup(pullsIn(reason).map((pull) => pull.id));
+    return true;
+  }
+  if (event.shiftKey) return false;
+  if (key === 'j' || key === 'ArrowDown') moveTriageCursor(triageCursor + 1);
+  else if (key === 'k' || key === 'ArrowUp') moveTriageCursor(triageCursor - 1);
+  else if (key === 'g' || key === 'Home') moveTriageCursor(0);
+  else if (key === 'End') moveTriageCursor(Number.MAX_SAFE_INTEGER);
+  else if (key === ' ' || key === 'x') toggleTriageAtCursor();
+  else if (key === 'a') setTriagePicked(triagePulls.map((pull) => pull.id), true);
+  else if (key === 'n') setTriagePicked(triagePulls.map((pull) => pull.id), false);
+  else if (key === 'i') invertTriagePicks();
+  else if (key === 'd') toggleTriageGroup(pullsIn('draft').map((pull) => pull.id));
+  else if (key === 'm') dom.triageMessage.focus();
+  else return false;
+  return true;
+}
+
 dom.triage.addEventListener('keydown', (event) => {
-  if (event.target === dom.triageMessage && event.key === 'Enter' && !(event.metaKey || event.ctrlKey)) return;
-  if (event.target !== dom.triageMessage && event.key.toLowerCase() === 'a' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+  const isInMessage = event.target === dom.triageMessage;
+  if (isInMessage && event.key === 'Escape') {
     event.preventDefault();
-    setTriagePicked(triagePulls.map((pull) => pull.id), triageExcluded.size > 0);
+    dom.triageCopy.focus();
+    return;
+  }
+  if (isInMessage && event.key === 'Enter' && !(event.metaKey || event.ctrlKey)) return;
+  if (!isInMessage && !event.metaKey && !event.ctrlKey && !event.altKey && handleTriageKey(event)) {
+    event.preventDefault();
     return;
   }
   if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey) || dom.triageDevin.disabled) return;
@@ -2395,7 +2477,8 @@ dom.triage.addEventListener('close', () => {
   const targets = triageTargets();
   if (targets.length === 0) return;
   if (dom.triage.returnValue === 'devin') {
-    void sendTriageToDevin(targets, dom.triageMessage.value.trim() || BULK_FIX_MESSAGE);
+    const typed = dom.triageMessage.value.trim();
+    void sendTriageToDevin(targets, (pull) => typed || triageDefaultMessage(pull));
     return;
   }
   if (dom.triage.returnValue !== 'copy') return;
@@ -2664,7 +2747,7 @@ async function fixWithDevin(): Promise<void> {
 
 const DEVIN_BULK_CONCURRENCY = 4;
 
-async function sendTriageToDevin(targets: readonly PullRequest[], message: string): Promise<void> {
+async function sendTriageToDevin(targets: readonly PullRequest[], messageFor: (pull: PullRequest) => string): Promise<void> {
   toast(`Finding Devin sessions for ${targets.map((pull) => `#${pull.number}`).join(', ')}…`);
   const sent: number[] = [];
   const skipped: number[] = [];
@@ -2677,7 +2760,7 @@ async function sendTriageToDevin(targets: readonly PullRequest[], message: strin
         skipped.push(pull.number);
         continue;
       }
-      await messageDevinSession(sessionId, message).then(
+      await messageDevinSession(sessionId, messageFor(pull)).then(
         () => sent.push(pull.number),
         (error: unknown) => failures.push(`#${pull.number} (${errorMessage(error)})`),
       );
@@ -2685,8 +2768,10 @@ async function sendTriageToDevin(targets: readonly PullRequest[], message: strin
   };
   await Promise.all(Array.from({ length: Math.min(DEVIN_BULK_CONCURRENCY, targets.length) }, worker));
   const list = (numbers: number[]): string => numbers.sort((left, right) => left - right).map((number) => `#${number}`).join(', ');
-  const quoted = message.length > 60 ? `${message.slice(0, 60)}…` : message;
-  const parts = [sent.length > 0 ? `Sent “${quoted}” to Devin for ${list(sent)}` : `Sent “${quoted}” to no Devin sessions`];
+  const messages = [...new Set(targets.map(messageFor))];
+  const only = messages.length === 1 ? messages[0] ?? '' : null;
+  const quoted = only == null ? 'messages' : `“${only.length > 60 ? `${only.slice(0, 60)}…` : only}”`;
+  const parts = [sent.length > 0 ? `Sent ${quoted} to Devin for ${list(sent)}` : `Sent ${quoted} to no Devin sessions`];
   if (skipped.length > 0) parts.push(`no session on ${list(skipped)}`);
   if (failures.length > 0) parts.push(`failed: ${failures.join(', ')}`);
   toast(parts.join(' · '), failures.length > 0 || sent.length === 0);

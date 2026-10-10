@@ -13,6 +13,25 @@ export const ATTENTION_META: Record<AttentionReason, { title: string; tone: 'bad
   'not approved': { title: 'Not approved', tone: 'wait', task: 'read the PR and all review comments, address anything unresolved, make sure checks pass, then request review from the suggested reviewers (`gh pr edit <url> --add-reviewer`); never self-approve' },
 };
 
+export type TriageReason = AttentionReason | 'draft';
+
+export const TRIAGE_ORDER: readonly TriageReason[] = [...ATTENTION_ORDER, 'draft'];
+
+export const TRIAGE_META: Record<TriageReason, { title: string; tone: 'bad' | 'wait' | 'draft'; task: string }> = {
+  ...ATTENTION_META,
+  draft: { title: 'Drafts', tone: 'draft', task: 'finish whatever the description says is left, make sure checks pass, then mark it ready for review (`gh pr ready <url>`)' },
+};
+
+/** Groups a pull falls under in the ⇧X dialog: drafts only under Drafts, everything else by attention reason. */
+export function triageReasons(pull: PullRequest): TriageReason[] {
+  return pull.isDraft ? ['draft'] : attentionReasons(pull);
+}
+
+/** Open pulls the ⇧X dialog lists: anything needing attention, plus drafts (picked only on request). */
+export function isTriageCandidate(pull: PullRequest): boolean {
+  return pull.queueEntry == null && triageReasons(pull).length > 0;
+}
+
 export function isConflicted(pull: PullRequest): boolean {
   return pull.mergeable === 'CONFLICTING' || pull.mergeStateStatus === 'DIRTY';
 }
@@ -48,12 +67,12 @@ export function needsAttention(pull: PullRequest): boolean {
   return pull.queueEntry == null && !pull.isDraft && attentionReasons(pull).length > 0;
 }
 
-export function buildAgentPrompt(pulls: readonly PullRequest[], included: ReadonlySet<AttentionReason>): string {
+export function buildAgentPrompt(pulls: readonly PullRequest[], included: ReadonlySet<TriageReason>): string {
   const lines = pulls.map((pull) => {
-    const reasons = attentionReasons(pull).filter((reason) => included.has(reason)).join(' + ');
+    const reasons = triageReasons(pull).filter((reason) => included.has(reason)).join(' + ');
     return `- ${pull.url}\n  repo: ${pull.repository.nameWithOwner} · branch: ${pull.headRefName} → ${pull.baseRefName} · problem: ${reasons}\n  title: ${pull.title}`;
   });
-  const tasks = ATTENTION_ORDER.filter((reason) => included.has(reason)).map((reason) => `- ${ATTENTION_META[reason].title}: ${ATTENTION_META[reason].task}.`);
+  const tasks = TRIAGE_ORDER.filter((reason) => included.has(reason)).map((reason) => `- ${TRIAGE_META[reason].title}: ${TRIAGE_META[reason].task}.`);
   return [
     `Get these ${pulls.length} open pull request${pulls.length === 1 ? '' : 's'} to green, approved and mergeable.`,
     '',
