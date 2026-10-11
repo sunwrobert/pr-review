@@ -469,7 +469,7 @@ fn openrouter_key() -> Option<&'static str> {
 async fn review_context(repo: String, number: u64) -> Result<String, String> {
     validate_repo(&repo)?;
     let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
-    let query = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { body files(first: 100) { totalCount nodes { path additions deletions } } reviews(last: 20) { nodes { state bodyText author { login __typename } } } comments(last: 25) { nodes { bodyText author { login __typename } } } reviewThreads(last: 100) { nodes { isResolved isOutdated } } } } }";
+    let query = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { body files(first: 100) { totalCount nodes { path additions deletions } } reviews(last: 20) { nodes { state bodyText submittedAt author { login __typename } } } comments(last: 25) { nodes { bodyText createdAt author { login __typename } } } reviewThreads(last: 100) { nodes { isResolved isOutdated } } } } }";
     gh(&[
         "api", "graphql",
         "-f", &format!("query={query}"),

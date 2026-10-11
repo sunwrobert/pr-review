@@ -1,13 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { PullRequest } from './github';
+import { readinessScoreOf, type ReadinessSignals } from './readiness-score';
 
-export interface ReadinessResult {
-  score: number;
-  evidence: number;
-  risk: number;
-  blocker: number;
-  scope: number;
-  tested: number;
+/** Jev's signals for one pull; the score is derived from them plus live GitHub facts (see readiness-score.ts). */
+export interface ReadinessResult extends ReadinessSignals {
   reason: string;
 }
 
@@ -16,11 +12,11 @@ interface Author {
   __typename: 'User' | 'Bot' | 'Mannequin' | 'EnterpriseUserAccount' | 'Organization';
 }
 
-interface ReviewContext {
+export interface ReviewContext {
   body: string;
   files: { totalCount: number; nodes: { path: string; additions: number; deletions: number }[] };
-  reviews: { nodes: { state: string; bodyText: string; author: Author | null }[] };
-  comments: { nodes: { bodyText: string; author: Author | null }[] };
+  reviews: { nodes: { state: string; bodyText: string; submittedAt: string | null; author: Author | null }[] };
+  comments: { nodes: { bodyText: string; createdAt: string; author: Author | null }[] };
   reviewThreads: { nodes: { isResolved: boolean; isOutdated: boolean }[] };
 }
 
@@ -40,20 +36,22 @@ interface NoulAnswer {
   noul: number;
 }
 
-interface SystemOneResponse {
+export interface SystemOneResponse {
   answers?: Record<string, ScoreAnswer | NoulAnswer>;
   error?: { message?: string };
 }
 
 const MAX_TEXT_CHARS = 1_500;
 const MAX_BODY_CHARS = 4_000;
-const MAX_ITEMS = 12;
+const MAX_TIMELINE_ITEMS = 20;
+/** Bot boilerplate that reads like a concern but never is one (agent status lines, mutation and lint reports). */
+const NOISE_PATTERNS: readonly RegExp[] = [/^I'll fix CI failures/i, /We planted \d+ small deliberate bugs/i, /^@devin triage the surviving mutants/i, /Fallow audit report/i, /This comment will be updated automatically/i];
 
 const QUESTIONS = {
   merge_evidence: {
     type: 'score',
     instructions:
-      'Across the `pull_request.body`, `reviews` and `comments`, how strong is the explicit evidence that this pull request has been reviewed, verified and is ready to merge? Count concrete signals such as approving reviews that engage with the change, statements that feedback was addressed, reported test or end-to-end verification results, passing checks, and sign-off language. Automated reviewers and bots count when they state a concrete verdict.',
+      'Across the `pull_request.body` and `timeline`, how strong is the explicit evidence that this pull request has been reviewed, verified and is ready to merge? Count concrete signals such as approving reviews that engage with the change, statements that feedback was addressed, reported test or end-to-end verification results, passing checks, and sign-off language. Automated reviewers and bots count when they state a concrete verdict.',
     criteria: [
       'No evidence of review or verification',
       'Weak or generic signals only, such as a bare approval or an unverified claim',
@@ -65,7 +63,7 @@ const QUESTIONS = {
   outstanding_blockers: {
     type: 'noul',
     instructions:
-      'Do the `reviews`, `comments` or `pull_request.body` contain an unresolved request for changes, an open question awaiting an answer, a reported failing test, or a statement that the pull request is not ready (for example work in progress, do not merge, or waiting on another change)? Ignore concerns that a later comment says were fixed or answered.',
+      'Read `timeline` in order (oldest first) together with `pull_request.body`. Is there a request for changes, an open question, a reported failing test, or a statement that the pull request is not ready (work in progress, do not merge, waiting on another change) that NO later entry resolves? A later approval, a reviewer saying the suggestion was taken or addressed, a newer report from the same automated reviewer, or the author saying it was fixed all resolve earlier concerns. Optional suggestions, nits and "worth a decision" notes that the reviewer says are not blockers do not count. Automated "potential issue" findings only count if they are in the latest entry from that reviewer and nothing later addresses them. `review_threads.unresolved` is the count of unresolved inline threads.',
     criteria: {
       true: 'At least one blocker or open concern is still outstanding',
       false: 'No outstanding blockers; any concerns raised were resolved',
@@ -86,7 +84,7 @@ const QUESTIONS = {
   verified_testing: {
     type: 'score',
     instructions:
-      'Across the `pull_request.body`, `reviews` and `comments`, how strong is the evidence that this change was actually exercised end to end, not just unit tested? Count concrete reports of running the real app, service or API and observing the result: end-to-end or integration test runs with results, manual QA steps with outcomes, screenshots, recordings, before/after measurements, or a reviewer or bot stating they ran it. A test plan that was never run, or only unit tests, is weak evidence.',
+      'Across the `pull_request.body` and `timeline`, how strong is the evidence that this change was actually exercised end to end, not just unit tested? Count concrete reports of running the real app, service or API and observing the result: end-to-end or integration test runs with results, manual QA steps with outcomes, screenshots, recordings, before/after measurements, or a reviewer or bot stating they ran it. A test plan that was never run, or only unit tests, is weak evidence.',
     criteria: [
       'No testing mentioned',
       'Only claims, an unrun test plan, or unit tests only',
@@ -113,9 +111,32 @@ function clip(text: string, limit: number): string {
   return trimmed.length > limit ? `${trimmed.slice(0, limit)}…` : trimmed;
 }
 
-function authorKind(author: Author | null): string {
-  if (author == null) return 'unknown';
-  return author.__typename === 'Bot' || author.login.endsWith('[bot]') ? 'automated' : 'human';
+function isAutomated(author: Author | null): boolean {
+  return author != null && (author.__typename === 'Bot' || author.login.endsWith('[bot]') || /(?:^|-)(?:bot|ai-integration|pr-reviewer|pr-maintainer)(?:$|-)/i.test(author.login));
+}
+
+interface TimelineEntry {
+  at: string;
+  from: string;
+  automated: boolean;
+  kind: string;
+  text: string;
+}
+
+/** Reviews and comments merged oldest first. Only the latest entry per automated author survives, since bots re-post updated reports. */
+function buildTimeline(context: ReviewContext): TimelineEntry[] {
+  const reviews = context.reviews.nodes
+    .filter((review) => review.bodyText.trim() !== '' || review.state === 'APPROVED' || review.state === 'CHANGES_REQUESTED')
+    .map((review) => ({ at: review.submittedAt ?? '', author: review.author, kind: `review: ${review.state.toLowerCase()}`, text: review.bodyText }));
+  const comments = context.comments.nodes.filter((comment) => comment.bodyText.trim() !== '').map((comment) => ({ at: comment.createdAt, author: comment.author, kind: 'comment', text: comment.bodyText }));
+  const entries = [...reviews, ...comments]
+    .filter((entry) => !NOISE_PATTERNS.some((pattern) => pattern.test(entry.text.trim())))
+    .sort((left, right) => left.at.localeCompare(right.at));
+  const latestBotIndex = new Map(entries.flatMap((entry, index) => (isAutomated(entry.author) ? [[`${entry.author?.login}:${entry.kind === 'comment' ? 'comment' : 'review'}`, index] as const] : [])));
+  return entries
+    .filter((entry, index) => !isAutomated(entry.author) || entry.kind.endsWith('approved') || entry.kind.endsWith('changes_requested') || latestBotIndex.get(`${entry.author?.login}:${entry.kind === 'comment' ? 'comment' : 'review'}`) === index)
+    .slice(-MAX_TIMELINE_ITEMS)
+    .map((entry) => ({ at: entry.at.slice(0, 16), from: entry.author?.login ?? 'unknown', automated: isAutomated(entry.author), kind: entry.kind, text: clip(entry.text, MAX_TEXT_CHARS) }));
 }
 
 function buildState(pull: PullRequest, context: ReviewContext): Record<string, unknown> {
@@ -134,14 +155,7 @@ function buildState(pull: PullRequest, context: ReviewContext): Record<string, u
     },
     files: context.files.nodes.slice(0, 60).map((file) => `${file.path} (+${file.additions} -${file.deletions})`),
     review_threads: { total: threads.length, unresolved: threads.filter((thread) => !thread.isResolved && !thread.isOutdated).length },
-    reviews: context.reviews.nodes
-      .filter((review) => review.bodyText.trim() !== '' || review.state === 'APPROVED' || review.state === 'CHANGES_REQUESTED')
-      .slice(-MAX_ITEMS)
-      .map((review) => ({ reviewer: authorKind(review.author), verdict: review.state, text: clip(review.bodyText, MAX_TEXT_CHARS) })),
-    comments: context.comments.nodes
-      .filter((comment) => comment.bodyText.trim() !== '')
-      .slice(-MAX_ITEMS)
-      .map((comment) => ({ author: authorKind(comment.author), text: clip(comment.bodyText, MAX_TEXT_CHARS) })),
+    timeline: buildTimeline(context),
   };
 }
 
@@ -155,14 +169,19 @@ function noulOf(answers: Record<string, ScoreAnswer | NoulAnswer>, key: string):
   return answer?.type === 'noul' ? answer.noul : 0;
 }
 
-function describe(result: Omit<ReadinessResult, 'reason'>): string {
+function describe(signals: ReadinessSignals): string {
   const parts = [
-    result.evidence >= 0.75 ? 'strong sign-off' : result.evidence >= 0.5 ? 'reviewed' : 'little review evidence',
-    result.blocker >= 0.5 ? 'open concerns' : null,
-    result.tested >= 0.75 ? 'e2e tested' : null,
-    result.risk >= 0.75 ? 'high-risk area' : result.risk <= 0.25 ? 'low risk' : null,
+    signals.evidence >= 0.75 ? 'strong sign-off' : signals.evidence >= 0.5 ? 'reviewed' : 'little review evidence',
+    signals.blocker >= 0.5 ? 'open concerns' : null,
+    signals.tested >= 0.75 ? 'e2e tested' : null,
+    signals.risk >= 0.75 ? 'high-risk area' : signals.risk <= 0.25 ? 'low risk' : null,
   ];
   return parts.filter((part) => part != null).join(' · ');
+}
+
+/** Combined 0–1 readiness: live GitHub facts first, Jev's judgement on top. */
+export function readinessScore(pull: PullRequest, result: ReadinessSignals): number {
+  return readinessScoreOf(pull, result);
 }
 
 export function isReadinessAvailable(): Promise<boolean> {
@@ -173,8 +192,15 @@ export async function assessReadiness(pull: PullRequest): Promise<ReadinessResul
   const contextResponse: ContextResponse = JSON.parse(await invoke<string>('review_context', { repo: pull.repository.nameWithOwner, number: pull.number }));
   const context = contextResponse.data?.repository?.pullRequest;
   if (context == null) throw new Error(contextResponse.errors?.[0]?.message ?? 'Pull request context unavailable');
-  const request = JSON.stringify({ model: 'jev-latest', state: buildState(pull, context), questions: QUESTIONS });
-  const response: SystemOneResponse = JSON.parse(await invoke<string>('readiness', { request }));
+  const response: SystemOneResponse = JSON.parse(await invoke<string>('readiness', { request: buildReadinessRequest(pull, context) }));
+  return toReadinessResult(response);
+}
+
+export function buildReadinessRequest(pull: PullRequest, context: ReviewContext): string {
+  return JSON.stringify({ model: 'jev-latest', state: buildState(pull, context), questions: QUESTIONS });
+}
+
+export function toReadinessResult(response: SystemOneResponse): ReadinessResult {
   const answers = response.answers;
   if (answers == null) throw new Error(response.error?.message ?? 'No answers returned');
   const evidence = scoreOf(answers, 'merge_evidence');
@@ -182,7 +208,6 @@ export async function assessReadiness(pull: PullRequest): Promise<ReadinessResul
   const risk = scoreOf(answers, 'change_risk');
   const scope = scoreOf(answers, 'scope_clarity');
   const tested = scoreOf(answers, 'verified_testing');
-  const score = 0.5 * evidence + 0.2 * scope + 0.3 * (1 - risk) - 0.6 * blocker;
-  const result = { score, evidence, risk, blocker, scope, tested };
-  return { ...result, reason: describe(result) };
+  const signals = { evidence, risk, blocker, scope, tested };
+  return { ...signals, reason: describe(signals) };
 }

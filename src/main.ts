@@ -26,7 +26,7 @@ import { isSemanticMatch, semanticMatches } from './semantic-search';
 import { VirtualList, type VirtualRow } from './virtual-list';
 import { invalidateConversation, loadConversation, type ConversationItem } from './conversation';
 import { isReady, isRecent, isSmall, matchesSmartFilter, sortPulls, type SmartFilter, type SortOrder } from './smart';
-import { assessReadiness, isReadinessAvailable, type ReadinessResult } from './readiness';
+import { assessReadiness, isReadinessAvailable, readinessScore, type ReadinessResult } from './readiness';
 
 interface State {
   kind: QueueKind;
@@ -444,8 +444,11 @@ function readinessDot(pull: PullRequest): string {
   const score = aiScoreFor(pull);
   if (score == null) return '';
   const percent = Math.round(Math.max(0, Math.min(1, score)) * 100);
-  const toneName = percent >= 65 ? 'ok' : percent >= 40 ? 'wait' : 'bad';
-  return `<span class="ai-score ${toneName}" title="Readiness ${percent}%">${percent}</span>`;
+  const toneName = percent >= 70 ? 'ok' : percent >= 50 ? 'wait' : 'bad';
+  const result = aiResults.get(aiKey(pull));
+  const isRisky = (result?.risk ?? 0) >= 0.75;
+  const title = [`Readiness ${percent}`, result?.reason ?? '', isRisky ? 'High-risk area: review carefully' : ''].filter((part) => part !== '').join(' · ');
+  return `<span class="ai-score ${toneName}${isRisky ? ' risky' : ''}" title="${escapeHtml(title)}">${percent}</span>`;
 }
 
 function avatar(pull: PullRequest): string {
@@ -1456,7 +1459,7 @@ function cachedMergeState(pull: PullRequest): MergeState | null {
 }
 
 const AI_CONCURRENCY = 4;
-const AI_CACHE_KEY = 'jevReadiness.v2';
+const AI_CACHE_KEY = 'jevReadiness.v3';
 const aiResults = new Map<string, ReadinessResult>(Object.entries(JSON.parse(localStorage.getItem(AI_CACHE_KEY) ?? '{}') as Record<string, ReadinessResult>));
 const aiPending = new Set<string>();
 let isAiEnabled = false;
@@ -1467,7 +1470,8 @@ function aiKey(pull: PullRequest): string {
 }
 
 function aiScoreFor(pull: PullRequest): number | undefined {
-  return isAiEnabled ? aiResults.get(aiKey(pull))?.score : undefined;
+  const result = isAiEnabled ? aiResults.get(aiKey(pull)) : undefined;
+  return result == null ? undefined : readinessScore(pull, result);
 }
 
 function persistAiResults(): void {

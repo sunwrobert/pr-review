@@ -276,6 +276,7 @@ img { -webkit-user-drag: none; }
 .ai-score.ok { color: var(--ok); background: rgb(76 183 130 / .12); }
 .ai-score.wait { color: var(--wait); background: rgb(242 201 76 / .12); }
 .ai-score.bad { color: var(--bad); background: rgb(235 87 87 / .12); }
+.ai-score.risky { box-shadow: inset 0 0 0 1px currentColor; }
 
 .status-bar { flex: none; display: flex; align-items: center; gap: 6px; height: 40px; padding: 0 20px 0 24px; border-bottom: 1px solid var(--border-soft); background: var(--bg); overflow: hidden; white-space: nowrap; }
 .chip-meta { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 6px; background: var(--bg-elev); border: 1px solid var(--border-soft); color: var(--text-2); font-size: 12px; font-weight: 500; flex: none; min-width: 0; }
