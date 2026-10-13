@@ -529,12 +529,9 @@ async fn open_in_browser(url: String) -> Result<(), String> {
     if !is_safe {
         return Err("only https links can be opened".to_string());
     }
-    let chrome = Command::new("/usr/bin/open").args(["-b", "com.google.Chrome", "--", &url]).status().await;
-    if matches!(chrome, Ok(status) if status.success()) {
-        return Ok(());
-    }
-    let fallback = Command::new("/usr/bin/open").args(["--", &url]).status().await.map_err(|error| error.to_string())?;
-    if fallback.success() { Ok(()) } else { Err(format!("could not open {url}")) }
+    // The default browser, so link routers like Ferry or Velja can pick the browser and profile.
+    let status = Command::new("/usr/bin/open").args(["--", &url]).status().await.map_err(|error| error.to_string())?;
+    if status.success() { Ok(()) } else { Err(format!("could not open {url}")) }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
