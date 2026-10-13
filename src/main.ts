@@ -12,6 +12,7 @@ import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } f
 import { ThemePicker } from './theme-picker';
 import './styles.css';
 import { approvePull, closePull, commentOnPull, messageDevinSession, fetchViewerLogin, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchQueue, type MergeState, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
+import { NavHistory, type NavEntry, type NavSource } from './nav-history';
 import { DiffView, parseDiff, type DiffStyle, type ParsedFile } from './diffs';
 import { sanitizeHtml } from './sanitize';
 import { CommandRegistry, renderShortcut, type Command } from './commands';
@@ -682,7 +683,7 @@ function syncDetailVisibility(pulls: PullRequest[]): void {
   if (first != null) {
     cancelAnimationFrame(pendingAutoSelect);
     pendingAutoSelect = requestAnimationFrame(() => {
-      if (selectedPull() == null) void select(first);
+      if (selectedPull() == null) void select(first, 'replace');
     });
     return;
   }
@@ -1284,8 +1285,15 @@ let detailFrame = 0;
 let lastSelectAt = 0;
 const RAPID_SELECT_MS = 90;
 
-function select(pull: PullRequest): Promise<void> {
+const navHistory = new NavHistory();
+
+function select(pull: PullRequest, source: NavSource = 'jump'): Promise<void> {
   const previousId = state.selectedId;
+  if (previousId !== pull.id && source !== 'none') {
+    navHistory.saveScroll(dom.descPane.scrollTop, diffView.scrollPosition());
+    navHistory.visit({ kind: state.kind, pullId: pull.id }, source, Date.now());
+  }
+  syncNavButtons();
   state.selectedId = pull.id;
   if (previousId != null && previousId !== pull.id && leaving.has(previousId)) scheduleLeave(previousId);
   state.activeFileIndex = -1;
@@ -1358,7 +1366,7 @@ function movePull(delta: number): void {
   if (pulls.length === 0) return;
   const index = pulls.findIndex((pull) => pull.id === state.selectedId);
   const next = pulls[Math.min(pulls.length - 1, Math.max(0, index + delta))];
-  if (next != null && next.id !== state.selectedId) void select(next);
+  if (next != null && next.id !== state.selectedId) void select(next, 'step');
   if (next != null && visualAnchorId != null) {
     state.selectedId = next.id;
     syncVisualRange();
@@ -1551,7 +1559,7 @@ function applyMergeStates(kind: QueueKind, states: MergeState[]): void {
     renderList();
     if (selectedPull() == null) {
       const first = visiblePulls()[0];
-      if (first != null) void select(first);
+      if (first != null) void select(first, 'replace');
     }
     const pull = selectedPull();
     if (pull != null) renderDetailMeta(pull);
@@ -1677,7 +1685,7 @@ function applyQueue(pulls: PullRequest[]): void {
     return;
   }
   const first = visiblePulls()[0];
-  if (first != null) void select(first);
+  if (first != null) void select(first, 'replace');
 }
 
 /** Updates the open PR after a background refresh without rebuilding the description, so images and scroll stay put. */
@@ -1862,7 +1870,7 @@ document.addEventListener('paste', (event) => {
   if (applyPastedText(text)) event.preventDefault();
 });
 
-function switchKind(kind: QueueKind): void {
+function switchKind(kind: QueueKind, restoreId: string | null = null): void {
   state.kind = kind;
   state.checkedIds.clear();
   state.selectedId = null;
@@ -1870,8 +1878,9 @@ function switchKind(kind: QueueKind): void {
   document.querySelectorAll<HTMLButtonElement>('.views button').forEach((button) => button.classList.toggle('active', button.dataset.kind === kind));
   state.pulls = queueCache.get(kind) ?? [];
   renderList();
-  const first = visiblePulls()[0];
-  if (first != null) void select(first);
+  const restored = restoreId == null ? undefined : visiblePulls().find((pull) => pull.id === restoreId);
+  const first = restored ?? visiblePulls()[0];
+  if (first != null) void select(first, restoreId == null ? 'jump' : 'none');
   void scoreWithJev(state.pulls);
   renderRefreshStatus();
   groupsSignature = '';
@@ -2003,7 +2012,7 @@ function setSmartFilter(filter: SmartFilter): void {
   localStorage.setItem('smartFilter', state.smartFilter);
   renderList();
   const first = visiblePulls()[0];
-  if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) void select(first);
+  if (first != null && !visiblePulls().some((pull) => pull.id === state.selectedId)) void select(first, 'replace');
 }
 
 function setSortOrder(order: SortOrder): void {
@@ -2306,6 +2315,70 @@ function openMediaFrom(target: HTMLElement): boolean {
   if (index < 0) return false;
   return lightbox.open(items, index);
 }
+function isLiveEntry(entry: NavEntry): boolean {
+  return (entry.kind === state.kind ? state.pulls : queueCache.get(entry.kind) ?? []).some((pull) => pull.id === entry.pullId) && !leaving.has(entry.pullId);
+}
+
+function restoreEntry(entry: NavEntry): void {
+  if (entry.kind !== state.kind) switchKind(entry.kind, entry.pullId);
+  let pull = visiblePulls().find((candidate) => candidate.id === entry.pullId);
+  if (pull == null) {
+    const hidden = state.pulls.find((candidate) => candidate.id === entry.pullId);
+    if (hidden == null) return;
+    clearFiltersFor(hidden);
+    pull = visiblePulls().find((candidate) => candidate.id === entry.pullId) ?? hidden;
+  }
+  void select(pull, 'none').then(() => {
+    if (state.selectedId !== entry.pullId) return;
+    dom.descPane.scrollTop = entry.descScroll;
+    diffView.restoreScroll(entry.diffScroll);
+  });
+}
+
+/** Back/forward lands on a PR the current filter hides: clear the filter rather than leave the list out of sync. */
+function clearFiltersFor(pull: PullRequest): void {
+  if (state.filter !== '') {
+    dom.filter.value = '';
+    state.filter = '';
+    renderSearchState();
+  }
+  if (state.smartFilter !== 'all' && !visiblePulls().some((candidate) => candidate.id === pull.id)) {
+    state.smartFilter = 'all';
+    localStorage.setItem('smartFilter', state.smartFilter);
+  }
+  groups.filter((group) => collapsedGroups.has(group.id) && group.pullIds.includes(pull.id)).forEach((group) => collapsedGroups.delete(group.id));
+  invalidateList();
+  renderList();
+}
+
+function goHistory(delta: -1 | 1): void {
+  navHistory.saveScroll(dom.descPane.scrollTop, diffView.scrollPosition());
+  const entry = navHistory.go(delta, isLiveEntry);
+  syncNavButtons();
+  if (entry == null) return;
+  restoreEntry(entry);
+}
+
+function syncNavButtons(): void {
+  const back = document.getElementById('nav-back') as HTMLButtonElement | null;
+  const forward = document.getElementById('nav-forward') as HTMLButtonElement | null;
+  const previous = navHistory.peek(-1, isLiveEntry);
+  const next = navHistory.peek(1, isLiveEntry);
+  if (back != null) {
+    back.disabled = previous == null;
+    back.title = previous == null ? 'Back  ⌘[' : `Back to ${historyLabel(previous)}  ⌘[`;
+  }
+  if (forward != null) {
+    forward.disabled = next == null;
+    forward.title = next == null ? 'Forward  ⌘]' : `Forward to ${historyLabel(next)}  ⌘]`;
+  }
+}
+
+function historyLabel(entry: NavEntry): string {
+  const pull = (entry.kind === state.kind ? state.pulls : queueCache.get(entry.kind) ?? []).find((candidate) => candidate.id === entry.pullId);
+  return pull == null ? 'previous PR' : `#${pull.number} ${pull.title}`;
+}
+
 const listPane = element('list-pane');
 new ResizeObserver(([entry]) => listPane.classList.toggle('narrow', (entry?.contentRect.width ?? 999) < 400)).observe(listPane);
 const commands = new CommandRegistry();
@@ -2897,6 +2970,8 @@ const COMMANDS: Command[] = [
   { id: 'theme', section: 'Layout', title: 'Choose theme', aliases: 'light dark mode appearance color catppuccin dracula tokyo night nord gruvbox github solarized monokai rose pine one dark', keys: ['t', '⌘⇧l'], run: openThemePicker },
   { id: 'reset-layout', section: 'Layout', title: 'Reset layout', aliases: 'panes widths default', keys: ['⌘⇧0'], run: () => layout.reset() },
 
+  { id: 'nav-back', section: 'Navigate', title: 'Back', aliases: 'history previous last go back', keys: ['⌘[', '⌃-'], run: () => goHistory(-1), allowWhileTyping: true },
+  { id: 'nav-forward', section: 'Navigate', title: 'Forward', aliases: 'history next go forward', keys: ['⌘]', '⌃⇧-'], run: () => goHistory(1), allowWhileTyping: true },
   { id: 'next-pr', section: 'Navigate', title: 'Next pull request', keys: ['j', '↓'], run: () => movePull(1) },
   { id: 'prev-pr', section: 'Navigate', title: 'Previous pull request', keys: ['k', '↑'], run: () => movePull(-1) },
   { id: 'page-diff-down', section: 'Navigate', title: 'Page down (middle pane)', keys: ['space'], run: () => scrollPane('middle', 'page-down'), isEnabled: hasPull },
@@ -3035,6 +3110,15 @@ dom.filter.addEventListener('input', () => {
   scheduleSemanticSearch();
 });
 element('toggle-sidebar').addEventListener('click', () => layout.toggle('list'));
+element('nav-back').addEventListener('click', () => goHistory(-1));
+element('nav-forward').addEventListener('click', () => goHistory(1));
+// Mouse side buttons, like a browser.
+window.addEventListener('mouseup', (event) => {
+  if (event.button !== 3 && event.button !== 4) return;
+  event.preventDefault();
+  goHistory(event.button === 3 ? -1 : 1);
+});
+syncNavButtons();
 element('open-help').addEventListener('click', openHelp);
 element('open-github').addEventListener('click', openSelectedOnGitHub);
 element('refresh-button').addEventListener('click', manualRefresh);

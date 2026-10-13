@@ -28,6 +28,7 @@ A fast, keyboard-first macOS app for reviewing and merging GitHub pull requests.
 - **Themes:** press `T` for a live-preview picker with 57 themes grouped into Dark (35) and Light (22), or follow macOS. Includes Catppuccin, Tokyo Night, Dracula, One Dark/Light, GitHub (dark, dimmed, light, high contrast), VS Code Dark+/Light+, Nord, Gruvbox, Rosé Pine (main, Moon, Dawn), Solarized, Ayu, Everforest, Kanagawa, Material, Night Owl, Monokai, Poimandres, Synthwave '84, Vitesse, Min, Vesper, and T3 Code's palettes (T3 Code, T3 Chat, Grove, Ocean, Ember, Iris; dark and light, regenerate with `bun scripts/import-t3-themes.ts <t3code>/packages/shared/src/themePalettes.ts`). Diff syntax colours use the matching editor theme.
 - **Close:** `⇧W` (or the ⊗ button in the top bar, or **Close** in the bulk bar) closes the current PR, or every checked one, after a confirmation that lists them. An optional comment is posted first; the branch is kept.
 - **Bulk actions:** select with `E` / `⇧J` / `⇧R`, then approve, merge or close in sequence with per-PR error reporting.
+- **Back / forward:** `⌘[` / `⌘]` (also `⌃-` / `⌃⇧-`, the mouse side buttons, and the arrows next to the sidebar toggle) walk the PRs you opened, across views, like Linear or Slack. A quick run of `J`/`K` counts as one step, PRs the app picks on its own aren't recorded, merged or closed PRs are skipped, and each entry remembers where you'd scrolled. If a filter hides the PR you go back to, the filter is cleared.
 - **Keyboard:** Linear-style single keys, VS Code chords, and vim motions. `?` lists every shortcut.
 
 ## How it talks to GitHub
@@ -109,7 +110,7 @@ Vim motions work the same in every pane; the modifier picks the pane.
 
 | Area | Keys |
 | --- | --- |
-| Queue | `J`/`K` next/prev · `gg`/`G` first/last · `Space`/`⇧Space` page the middle pane |
+| Queue | `J`/`K` next/prev · `gg`/`G` first/last · `⌘[`/`⌘]` back/forward · `Space`/`⇧Space` page the middle pane |
 | Files | `N` or `]c`/`[c` next/prev file · `X` collapse · `S` split/unified |
 | Filters | `⇧T` group related work · `⌥1` Ready · `⌥4` Unready · `⌥0` All (Small `⌥2`, Recent `⌥3`, Tested `⌥5`) · `⇧S` sort · `⇧X` fix with agent · `⇧U` select unready · `⇧R` select ready |
 | Select | `⇧V` visual mode (then `J`/`K`) · `E` toggle · `⇧J`/`⇧K` extend · `⇧R` all ready · `⇧U` all unready · `⌘A` all · `⌫` or `Esc` clear |

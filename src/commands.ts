@@ -37,6 +37,7 @@ function eventKey(event: KeyboardEvent): string {
   if (event.code === 'BracketLeft') return '[';
   if (event.code === 'BracketRight') return ']';
   if (event.code === 'Comma') return ',';
+  if (event.code === 'Minus') return '-';
   if (event.code === 'Semicolon') return ';';
   return event.key;
 }

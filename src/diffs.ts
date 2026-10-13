@@ -101,6 +101,14 @@ export class DiffView {
     this.root.scrollTop = 0;
   }
 
+  scrollPosition(): number {
+    return this.root.scrollTop;
+  }
+
+  restoreScroll(position: number): void {
+    this.root.scrollTop = position;
+  }
+
   isCollapsed(id: string): boolean {
     return this.collapsed.has(id);
   }
