@@ -1,8 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { buildGroupingPrompt, GROUPING_RESPONSE_SCHEMA, GROUPING_SYSTEM_PROMPT, parseGroupingResponse, type FileGrouping, type PromptFile } from './file-groups';
 
-/** Cheap, fast and supports structured output; grouping is a one-shot read of the diff. */
-export const GROUPING_MODEL = 'anthropic/claude-haiku-5.5';
+/** Picked over Claude Haiku 5.5 on 5 real PRs: about half the cost, same speed, no duplicated files. */
+export const GROUPING_MODEL = 'openai/gpt-6-luna';
 
 interface ChatResponse {
   choices?: { message?: { content?: string | null } }[];

@@ -133,6 +133,7 @@ export const GROUPING_SYSTEM_PROMPT = `You organize a GitHub pull request's chan
 Grouping principles:
 - Group by intent, not by directory. One feature touching several modules is ONE group.
 - Use the fewest groups that still separate independent intents. A typical PR has 1-5 groups.
+- Split a group that would hold most of the PR's non-test files into the parts a reviewer reads in order (for example the new helper, then the code that adopts it), unless the PR is genuinely one small change.
 - Tests, stories and fixtures usually go in a group of their own, separate from the code they cover.
 - Order groups by review priority: the core change first, supporting changes next, mechanical changes (lockfiles, generated files, formatting) last.
 - Every path in the manifest goes into exactly one group.
