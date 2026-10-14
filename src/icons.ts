@@ -20,6 +20,8 @@ const PATHS = {
   chevronRight: '<path d="m9 18 6-6-6-6" />',
   chevronLeft: '<path d="m15 18-6-6 6-6" />',
   x: '<path d="M18 6 6 18" /> <path d="m6 6 12 12" />',
+  layers: '<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z" /> <path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65" /> <path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65" />',
+  flask: '<path d="M10 2v7.31" /> <path d="M14 9.3V1.99" /> <path d="M8.5 2h7" /> <path d="M14 9.3a6.5 6.5 0 1 1-4 0" /> <path d="M5.52 16h12.96" />',
   loader: '<path d="M21 12a9 9 0 1 1-6.219-8.56" />',
   circleCheck: '<circle cx="12" cy="12" r="10" /> <path d="m9 12 2 2 4-4" />',
   circleX: '<circle cx="12" cy="12" r="10" /> <path d="m15 9-6 6" /> <path d="m9 9 6 6" />',

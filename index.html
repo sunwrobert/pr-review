@@ -97,6 +97,15 @@
             <div id="diff-root"></div>
             <div class="resizer" data-resize="inspector" title="Drag to resize · double-click to reset"></div>
             <aside id="inspector">
+              <div id="review-bar" class="review-bar" hidden>
+                <div class="review-bar-row">
+                  <button type="button" class="chip" id="toggle-grouped-review" aria-pressed="false" title="Review one group of related files at a time  V"><i data-icon="layers"></i>Grouped <kbd>V</kbd></button>
+                  <button type="button" class="chip" id="toggle-hide-tests" aria-pressed="false" title="Hide test, story, fixture and snapshot files  ⇧H"><i data-icon="flask"></i>Hide tests <kbd>⇧</kbd><kbd>H</kbd></button>
+                  <span class="review-bar-meta muted" id="review-bar-meta"></span>
+                </div>
+                <div class="review-groups" id="review-groups" hidden></div>
+                <div class="review-group-summary" id="review-group-summary" hidden></div>
+              </div>
               <nav id="files" hidden></nav><span id="file-count" hidden></span>
             </aside>
           </div>

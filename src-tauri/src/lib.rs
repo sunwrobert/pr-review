@@ -19,6 +19,8 @@ const MAX_MERGE_STATE_IDS: usize = 25;
 const MAX_DIFF_FALLBACK_FILES: usize = 3000;
 const GH_TIMEOUT_SECS: u64 = 45;
 const SYSTEM_ONE_URL: &str = "https://openrouter.ai/api/v1/systemone";
+const CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+const MAX_GROUPING_REQUEST_BYTES: usize = 400_000;
 const MAX_READINESS_STATE_BYTES: usize = 600_000;
 
 static OPENROUTER_KEY: OnceLock<Option<String>> = OnceLock::new();
@@ -511,6 +513,40 @@ async fn readiness(request: String) -> Result<String, String> {
     Err(format!("Jev {status}: {}", text.chars().take(300).collect::<String>()))
 }
 
+/// Asks an OpenRouter chat model for a file grouping. The frontend builds the full request body (model, messages,
+/// structured-output schema); this only checks its size and adds the key, which never leaves the backend.
+#[tauri::command]
+async fn group_files(request: String) -> Result<String, String> {
+    if request.len() > MAX_GROUPING_REQUEST_BYTES {
+        return Err("grouping request too large".to_string());
+    }
+    let key = tauri::async_runtime::spawn_blocking(openrouter_key)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or("OPENROUTER_API_KEY not configured")?;
+    let response = grouping_client()
+        .post(CHAT_URL)
+        .bearer_auth(key)
+        .header("Content-Type", "application/json")
+        .header("X-Title", "PR Review")
+        .body(request)
+        .send()
+        .await
+        .map_err(|error| error.without_url().to_string())?;
+    let status = response.status();
+    let text = response.text().await.map_err(|error| error.without_url().to_string())?;
+    if status.is_success() {
+        return Ok(text);
+    }
+    Err(format!("OpenRouter {status}: {}", text.chars().take(300).collect::<String>()))
+}
+
+/// Grouping reads a whole diff, so it gets a longer timeout than the 30 s readiness client.
+fn grouping_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| reqwest::Client::builder().timeout(std::time::Duration::from_secs(90)).build().expect("http client"))
+}
+
 fn http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -539,7 +575,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, viewer, comment, message_devin, threads, set_thread_resolved, reply_to_thread, merge_queue, merge_states, conversation, body, diff, approve, merge, close, open_in_browser, review_context, readiness_available, readiness])
+        .invoke_handler(tauri::generate_handler![queue, viewer, comment, message_devin, threads, set_thread_resolved, reply_to_thread, merge_queue, merge_states, conversation, body, diff, approve, merge, close, open_in_browser, review_context, readiness_available, readiness, group_files])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }

@@ -12,6 +12,9 @@ import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } f
 import { ThemePicker } from './theme-picker';
 import './styles.css';
 import { approvePull, closePull, commentOnPull, messageDevinSession, fetchViewerLogin, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchQueue, type MergeState, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
+import { GroupedReview } from './grouped-review';
+import { groupWithAi } from './file-grouping-ai';
+import type { FileGrouping, PromptFile } from './file-groups';
 import { NavHistory, type NavEntry, type NavSource } from './nav-history';
 import { DiffView, parseDiff, type DiffStyle, type ParsedFile } from './diffs';
 import { sanitizeHtml } from './sanitize';
@@ -126,7 +129,10 @@ const diffCache = new Map<string, Promise<ParsedFile[]>>();
 const queueCache = new Map<QueueKind, PullRequest[]>();
 let isSelectedQueued = false;
 const diffView = new DiffView(dom.diffRoot, state.diffStyle, { onToggle: (id, isCollapsed) => markFileCollapsed(id, isCollapsed) });
+/** Files the diff pane shows right now (after Grouped / Hide tests); `allFiles` is the whole PR. */
 let currentFiles: ParsedFile[] = [];
+let allFiles: ParsedFile[] = [];
+let groupingSubject: PullRequest | null = null;
 let renderToken = 0;
 let toastTimer: number | undefined;
 
@@ -911,6 +917,7 @@ async function sendThreadReply(threadId: string, form: HTMLElement, alsoResolve:
 
 function jumpToThread(threadId: string): void {
   const thread = currentThreads.find((candidate) => candidate.id === threadId);
+  if (thread != null && !currentFiles.some((candidate) => candidate.diff.name === thread.path) && allFiles.some((candidate) => candidate.diff.name === thread.path)) groupedReview.reveal(thread.path);
   const file = currentFiles.find((candidate) => candidate.diff.name === thread?.path);
   if (thread == null || file == null) {
     toast(`${thread?.path ?? 'That file'} is not in the current diff`, true);
@@ -1250,6 +1257,25 @@ function renderFiles(files: ParsedFile[]): void {
     .join('');
 }
 
+function showFiles(files: ParsedFile[]): void {
+  const isChange = files.length !== currentFiles.length || files.some((file, index) => file.id !== currentFiles[index]?.id);
+  currentFiles = files;
+  state.activeFileIndex = -1;
+  if (!isChange) return;
+  diffView.resetScroll();
+  diffView.show(files);
+  renderFiles(files);
+}
+
+async function groupingFor(files: readonly PromptFile[]): Promise<FileGrouping> {
+  const pull = groupingSubject;
+  if (pull == null) throw new Error('no pull request');
+  const html = await loadBody(pull).catch(() => '');
+  const holder = document.createElement('div');
+  holder.innerHTML = sanitizeHtml(html);
+  return groupWithAi(pull.title, holder.textContent ?? '', files);
+}
+
 function markFileCollapsed(id: string, isCollapsed: boolean): void {
   dom.files.querySelector(`[data-id="${CSS.escape(id)}"]`)?.classList.toggle('collapsed', isCollapsed);
 }
@@ -1334,6 +1360,8 @@ async function renderSelection(pull: PullRequest): Promise<void> {
   dom.empty.hidden = true;
   dom.pr.hidden = false;
   currentFiles = [];
+  allFiles = [];
+  groupedReview.clear();
   diffView.show([]);
   renderDetail(pull);
   const diffPromise = loadDiff(pull);
@@ -1349,9 +1377,9 @@ async function renderSelection(pull: PullRequest): Promise<void> {
   try {
     const files = await diffPromise;
     if (token !== renderToken) return;
-    currentFiles = files;
-    diffView.show(files);
-    renderFiles(files);
+    allFiles = files;
+    groupingSubject = pull;
+    showFiles(groupedReview.load(diffKey(pull), files));
   } catch (error) {
     if (token !== renderToken) return;
     dom.files.innerHTML = `<div class="error pad">${escapeHtml(errorMessage(error))}</div>`;
@@ -2379,6 +2407,18 @@ function historyLabel(entry: NavEntry): string {
   return pull == null ? 'previous PR' : `#${pull.number} ${pull.title}`;
 }
 
+const groupedReview = new GroupedReview(
+  {
+    bar: element('review-bar'),
+    meta: element('review-bar-meta'),
+    groups: element('review-groups'),
+    summary: element('review-group-summary'),
+    groupedToggle: element<HTMLButtonElement>('toggle-grouped-review'),
+    testsToggle: element<HTMLButtonElement>('toggle-hide-tests'),
+  },
+  { show: (files) => showFiles([...files]), groupWithAi: groupingFor, isAiAvailable: () => isAiEnabled, escape: escapeHtml, onToast: (message, isError) => toast(message, isError) },
+);
+
 const listPane = element('list-pane');
 new ResizeObserver(([entry]) => listPane.classList.toggle('narrow', (entry?.contentRect.width ?? 999) < 400)).observe(listPane);
 const commands = new CommandRegistry();
@@ -2989,6 +3029,10 @@ const COMMANDS: Command[] = [
 
   ...VIM_COMMANDS,
   ...DIFF_SCROLL_COMMANDS,
+  { id: 'grouped-review', section: 'Diff', title: 'Grouped review (one group of related files at a time)', aliases: 'group files review guide scope feature pulls.review linear', keys: ['v'], run: () => groupedReview.toggleGrouped(), isEnabled: () => allFiles.length > 0 },
+  { id: 'hide-tests', section: 'Diff', title: 'Hide / show test files', aliases: 'tests spec fixtures snapshots stories exclude', keys: ['⇧h'], run: () => groupedReview.toggleHideTests(), isEnabled: () => allFiles.length > 0 },
+  { id: 'next-group', section: 'Diff', title: 'Next file group', keys: ['⌥]', ']g'], run: () => void groupedReview.moveGroup(1), isEnabled: () => groupedReview.isActive },
+  { id: 'prev-group', section: 'Diff', title: 'Previous file group', keys: ['⌥[', '[g'], run: () => void groupedReview.moveGroup(-1), isEnabled: () => groupedReview.isActive },
   { id: 'toggle-file', section: 'Diff', title: 'Collapse / expand file', aliases: 'fold unfold hide', keys: ['x'], run: toggleCurrentFile, isEnabled: hasFiles },
   { id: 'toggle-bots', section: 'Pull request', title: 'Show / hide bot comments', aliases: 'devin perry github-actions automated comments conversation', keys: ['⇧b'], run: () => { showBotComments = !showBotComments; localStorage.setItem('showBotComments', showBotComments ? '1' : '0'); const pull = selectedPull(); if (pull != null) renderDetail(pull); toast(showBotComments ? 'Showing bot comments' : 'Hiding bot comments'); } },
   { id: 'diff-style', section: 'Diff', title: 'Toggle split / unified diff', aliases: 'side by side inline view', keys: ['s', '⌘⌥s'], run: toggleStyle },
