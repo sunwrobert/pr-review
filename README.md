@@ -29,7 +29,7 @@ A fast, keyboard-first macOS app for reviewing and merging GitHub pull requests.
 - **Close:** `⇧W` (or the ⊗ button in the top bar, or **Close** in the bulk bar) closes the current PR, or every checked one, after a confirmation that lists them. An optional comment is posted first; the branch is kept.
 - **Bulk actions:** select with `E` / `⇧J` / `⇧R`, then approve, merge or close in sequence with per-PR error reporting.
 - **Grouped review (from [pulls.review](https://github.com/antfu/pulls.review)):** the bar above the diff has **Grouped** (`V`), which shows one group of related files at a time with a short summary, and **Hide tests** (`⇧H`), which drops test, story, fixture and snapshot files. Groups come from path rules instantly (Code, Tests, Docs, Config, Dependencies, Generated); with `OPENROUTER_API_KEY` set, Claude Haiku regroups by intent in review order, about a cent per PR, cached per PR version. `⌥]` / `⌥[` (or `]g` / `[g`) switch groups, and jumping to a review thread brings its file into view. Both toggles are remembered.
-- **Back / forward:** `⌘[` / `⌘]` (also `⌃-` / `⌃⇧-`, the mouse side buttons, and the arrows next to the sidebar toggle) walk the PRs you opened, across views, like Linear or Slack. A quick run of `J`/`K` counts as one step, PRs the app picks on its own aren't recorded, merged or closed PRs are skipped, and each entry remembers where you'd scrolled. If a filter hides the PR you go back to, the filter is cleared.
+- **Back / forward:** `⌘←` / `⌘→` like a browser (also `⌘[` / `⌘]`, `⌃-` / `⌃⇧-`, the mouse side buttons, and the arrows next to the sidebar toggle) walk the PRs you opened, across views, like Linear or Slack. A quick run of `J`/`K` counts as one step, PRs the app picks on its own aren't recorded, merged or closed PRs are skipped, and each entry remembers where you'd scrolled. If a filter hides the PR you go back to, the filter is cleared. In a text box `⌘←` / `⌘→` still move the cursor; `⌘[` / `⌘]` work everywhere.
 - **Keyboard:** Linear-style single keys, VS Code chords, and vim motions. `?` lists every shortcut.
 
 ## How it talks to GitHub
@@ -111,7 +111,7 @@ Vim motions work the same in every pane; the modifier picks the pane.
 
 | Area | Keys |
 | --- | --- |
-| Queue | `J`/`K` next/prev · `gg`/`G` first/last · `⌘[`/`⌘]` back/forward · `Space`/`⇧Space` page the middle pane |
+| Queue | `J`/`K` next/prev · `gg`/`G` first/last · `⌘←`/`⌘→` back/forward · `Space`/`⇧Space` page the middle pane |
 | Files | `N` or `]c`/`[c` next/prev file · `X` collapse · `S` split/unified · `V` grouped review · `⌥]`/`⌥[` next/prev group · `⇧H` hide tests |
 | Filters | `⇧T` group related work · `⌥1` Ready · `⌥4` Unready · `⌥0` All (Small `⌥2`, Recent `⌥3`, Tested `⌥5`) · `⇧S` sort · `⇧X` fix with agent · `⇧U` select unready · `⇧R` select ready |
 | Select | `⇧V` visual mode (then `J`/`K`) · `E` toggle · `⇧J`/`⇧K` extend · `⇧R` all ready · `⇧U` all unready · `⌘A` all · `⌫` or `Esc` clear |

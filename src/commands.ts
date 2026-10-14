@@ -17,7 +17,7 @@ interface Chord {
   alt: boolean;
 }
 
-const KEY_ALIASES: Record<string, string> = { '⌫': 'Backspace', '↵': 'Enter', '↑': 'ArrowUp', '↓': 'ArrowDown', esc: 'Escape', space: ' ', Home: 'Home', End: 'End' };
+const KEY_ALIASES: Record<string, string> = { '⌫': 'Backspace', '↵': 'Enter', '↑': 'ArrowUp', '↓': 'ArrowDown', '←': 'ArrowLeft', '→': 'ArrowRight', esc: 'Escape', space: ' ', Home: 'Home', End: 'End' };
 
 const MODIFIER_PATTERN = /[⌘⌃⇧⌥]/g;
 

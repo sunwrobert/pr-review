@@ -2394,11 +2394,11 @@ function syncNavButtons(): void {
   const next = navHistory.peek(1, isLiveEntry);
   if (back != null) {
     back.disabled = previous == null;
-    back.title = previous == null ? 'Back  ⌘[' : `Back to ${historyLabel(previous)}  ⌘[`;
+    back.title = previous == null ? 'Back  ⌘←' : `Back to ${historyLabel(previous)}  ⌘←`;
   }
   if (forward != null) {
     forward.disabled = next == null;
-    forward.title = next == null ? 'Forward  ⌘]' : `Forward to ${historyLabel(next)}  ⌘]`;
+    forward.title = next == null ? 'Forward  ⌘→' : `Forward to ${historyLabel(next)}  ⌘→`;
   }
 }
 
@@ -3010,8 +3010,8 @@ const COMMANDS: Command[] = [
   { id: 'theme', section: 'Layout', title: 'Choose theme', aliases: 'light dark mode appearance color catppuccin dracula tokyo night nord gruvbox github solarized monokai rose pine one dark', keys: ['t', '⌘⇧l'], run: openThemePicker },
   { id: 'reset-layout', section: 'Layout', title: 'Reset layout', aliases: 'panes widths default', keys: ['⌘⇧0'], run: () => layout.reset() },
 
-  { id: 'nav-back', section: 'Navigate', title: 'Back', aliases: 'history previous last go back', keys: ['⌘[', '⌃-'], run: () => goHistory(-1), allowWhileTyping: true },
-  { id: 'nav-forward', section: 'Navigate', title: 'Forward', aliases: 'history next go forward', keys: ['⌘]', '⌃⇧-'], run: () => goHistory(1), allowWhileTyping: true },
+  { id: 'nav-back', section: 'Navigate', title: 'Back', aliases: 'history previous last go back', keys: ['⌘←', '⌘[', '⌃-'], run: () => goHistory(-1), allowWhileTyping: true },
+  { id: 'nav-forward', section: 'Navigate', title: 'Forward', aliases: 'history next go forward', keys: ['⌘→', '⌘]', '⌃⇧-'], run: () => goHistory(1), allowWhileTyping: true },
   { id: 'next-pr', section: 'Navigate', title: 'Next pull request', keys: ['j', '↓'], run: () => movePull(1) },
   { id: 'prev-pr', section: 'Navigate', title: 'Previous pull request', keys: ['k', '↑'], run: () => movePull(-1) },
   { id: 'page-diff-down', section: 'Navigate', title: 'Page down (middle pane)', keys: ['space'], run: () => scrollPane('middle', 'page-down'), isEnabled: hasPull },
