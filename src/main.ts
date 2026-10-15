@@ -1379,7 +1379,7 @@ async function renderSelection(pull: PullRequest): Promise<void> {
     if (token !== renderToken) return;
     allFiles = files;
     groupingSubject = pull;
-    showFiles(groupedReview.load(diffKey(pull), files));
+    showFiles(groupedReview.load(files));
   } catch (error) {
     if (token !== renderToken) return;
     dom.files.innerHTML = `<div class="error pad">${escapeHtml(errorMessage(error))}</div>`;

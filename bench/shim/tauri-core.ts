@@ -17,6 +17,7 @@ const pulls = (IS_DEMO ? DEMO_PULLS : generatePulls(COUNT)).map((pull) => (WITH_
 const byId = new Map(pulls.map((pull) => [pull.id, pull]));
 const byNumber = new Map(pulls.map((pull) => [pull.number, pull]));
 const calls: Record<string, number> = {};
+const AI_GROUPING_MS = new URLSearchParams(location.search).has('aiGroupingMs') ? Number(new URLSearchParams(location.search).get('aiGroupingMs')) : null;
 
 Object.assign(window, { __shimCalls: calls });
 
@@ -74,7 +75,18 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   },
   reply_to_thread: () => JSON.stringify({ data: {} }),
   merge_queue: () => JSON.stringify({ data: { repository: { mergeQueue: null } } }),
-  readiness_available: () => false,
+  readiness_available: () => AI_GROUPING_MS != null,
+  /** `?aiGroupingMs=N` turns the AI paths on and answers grouping after N ms with one group per top-level folder. */
+  group_files: async (args) => {
+    await new Promise((resolve) => setTimeout(resolve, AI_GROUPING_MS ?? 0));
+    const request = JSON.parse(String(args.request)) as { messages: { content: string }[] };
+    const manifest = /---MANIFEST---[^\n]*\n([\s\S]*?)(?:\n\n---|$)/.exec(request.messages[1]?.content ?? '')?.[1] ?? '';
+    const paths = manifest.split('\n').map((line) => line.split('  ')[0] ?? '').filter(Boolean);
+    const byFolder = new Map<string, string[]>();
+    paths.forEach((path) => byFolder.set(path.includes('/') ? path.split('/')[0]! : 'root', [...(byFolder.get(path.includes('/') ? path.split('/')[0]! : 'root') ?? []), path]));
+    const groups = [...byFolder].map(([folder, filePaths]) => ({ key: folder, label: `AI ${folder}`, summary: `Changes under ${folder}.`, category: 'core', critical: false, filePaths }));
+    return JSON.stringify({ choices: [{ message: { content: JSON.stringify({ overallSummary: 'Fake AI summary.', groups }) } }] });
+  },
   review_context: () => { throw new Error('offline harness'); },
   readiness: () => { throw new Error('offline harness'); },
   approve: () => 'ok',

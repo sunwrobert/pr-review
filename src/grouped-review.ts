@@ -22,7 +22,52 @@ interface Elements {
 
 const GROUPED_KEY = 'groupedReview';
 const HIDE_TESTS_KEY = 'hideTests';
-const CACHE_LIMIT = 40;
+/** Bump when the prompt, model or response shape changes so old groupings are not reused. */
+const STORE_KEY = 'aiFileGroupings.v1';
+const STORE_LIMIT = 80;
+
+/** FNV-1a over the diff's paths and hunks: the same diff gets the same key, whatever else changed on the PR. */
+export function diffFingerprint(files: readonly ParsedFile[]): string {
+  let hash = 0x811c9dc5;
+  let length = 0;
+  for (const file of files) {
+    const text = `${file.diff.name}\u0000${patchOf(file)}\u0001`;
+    length += text.length;
+    for (let index = 0; index < text.length; index++) {
+      hash ^= text.charCodeAt(index);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+  }
+  return `${files.length}:${length}:${hash.toString(36)}`;
+}
+
+/** AI groupings saved per diff fingerprint, newest last, so reopening a PR or restarting the app never re-runs the model. */
+class GroupingStore {
+  private entries: Record<string, FileGrouping>;
+
+  constructor() {
+    try {
+      this.entries = JSON.parse(localStorage.getItem(STORE_KEY) ?? '{}') as Record<string, FileGrouping>;
+    } catch {
+      this.entries = {};
+    }
+  }
+
+  get(key: string): FileGrouping | undefined {
+    return this.entries[key];
+  }
+
+  set(key: string, grouping: FileGrouping): void {
+    const { [key]: _previous, ...rest } = this.entries;
+    const kept = Object.entries(rest).slice(-(STORE_LIMIT - 1));
+    this.entries = { ...Object.fromEntries(kept), [key]: grouping };
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify(this.entries));
+    } catch {
+      // Storage full: keep it in memory for this session.
+    }
+  }
+}
 
 const toGroupable = (file: ParsedFile): GroupableFile => ({ path: file.diff.name, additions: file.additions, deletions: file.deletions, isBinary: file.diff.hunks.length === 0 && file.diff.type !== 'rename-pure' });
 
@@ -60,10 +105,12 @@ export class GroupedReview {
   private isGrouped = localStorage.getItem(GROUPED_KEY) === '1';
   private isHidingTests = localStorage.getItem(HIDE_TESTS_KEY) === '1';
   private files: ParsedFile[] = [];
-  private cacheKey = '';
+  private fingerprint = '';
+  private aiState: 'idle' | 'loading' | 'failed' = 'idle';
   private grouping: FileGrouping | null = null;
   private activeIndex = 0;
-  private readonly aiCache = new Map<string, Promise<FileGrouping>>();
+  private readonly store = new GroupingStore();
+  private readonly inFlight = new Map<string, Promise<FileGrouping>>();
   private token = 0;
 
   constructor(elements: Elements, hooks: GroupedReviewHooks) {
@@ -83,11 +130,13 @@ export class GroupedReview {
   }
 
   /** Called whenever a PR's diff finishes loading. Returns the files the diff pane should show. */
-  load(cacheKey: string, files: readonly ParsedFile[]): ParsedFile[] {
+  load(files: readonly ParsedFile[]): ParsedFile[] {
     this.token += 1;
-    this.cacheKey = cacheKey;
     this.files = [...files];
-    this.grouping = reconcileGrouping(groupByRules(this.files.map(toGroupable)), this.files.map(toGroupable));
+    this.fingerprint = diffFingerprint(this.files);
+    this.aiState = this.inFlight.has(this.fingerprint) ? 'loading' : 'idle';
+    const saved = this.hooks.isAiAvailable() ? this.store.get(this.fingerprint) : undefined;
+    this.grouping = reconcileGrouping(saved ?? groupByRules(this.files.map(toGroupable)), this.files.map(toGroupable));
     this.activeIndex = this.startIndex();
     this.elements.bar.hidden = files.length === 0;
     if (this.isGrouped) void this.upgradeToAi();
@@ -153,32 +202,42 @@ export class GroupedReview {
     this.hooks.show(this.visibleFiles());
   }
 
+  /** Runs the model once per diff: a saved grouping or a request already in flight is reused, never repeated. */
   private async upgradeToAi(): Promise<void> {
     if (!this.hooks.isAiAvailable() || this.files.length < 2 || this.grouping?.source === 'ai') return;
     const token = this.token;
-    const key = this.cacheKey;
-    let pending = this.aiCache.get(key);
+    const key = this.fingerprint;
+    const saved = this.store.get(key);
+    let pending = saved == null ? this.inFlight.get(key) : Promise.resolve(saved);
     if (pending == null) {
       pending = this.hooks.groupWithAi(this.files.map((file) => ({ ...toGroupable(file), patch: patchOf(file) })));
-      this.aiCache.set(key, pending);
-      if (this.aiCache.size > CACHE_LIMIT) this.aiCache.delete(this.aiCache.keys().next().value ?? '');
-      pending.catch(() => this.aiCache.delete(key));
-      this.renderMeta('Grouping with AI…');
+      this.inFlight.set(key, pending);
+      void pending.then((grouping) => this.store.set(key, grouping), () => undefined).finally(() => this.inFlight.delete(key));
+    }
+    if (saved == null) {
+      this.aiState = 'loading';
+      this.render();
     }
     try {
       const grouping = await pending;
       if (token !== this.token) return;
-      const activeKey = this.visibleGroups()[this.activeIndex]?.key;
-      this.grouping = reconcileGrouping(grouping, this.files.map(toGroupable));
-      const restored = this.visibleGroups().findIndex((group) => group.key === activeKey);
-      this.activeIndex = restored >= 0 ? restored : 0;
-      if (this.isGrouped) this.apply();
-      else this.render();
+      this.aiState = 'idle';
+      this.adopt(grouping);
     } catch (error) {
       if (token !== this.token) return;
+      this.aiState = 'failed';
       this.render();
       console.warn('AI grouping failed', error instanceof Error ? error.message : String(error));
     }
+  }
+
+  private adopt(grouping: FileGrouping): void {
+    const activeKey = this.visibleGroups()[this.activeIndex]?.key;
+    this.grouping = reconcileGrouping(grouping, this.files.map(toGroupable));
+    const restored = this.visibleGroups().findIndex((group) => group.key === activeKey);
+    this.activeIndex = restored >= 0 ? restored : 0;
+    if (this.isGrouped) this.apply();
+    else this.render();
   }
 
   /** AI groups are already in review order; rule groups list Docs first, so start on Code when there is one. */
@@ -213,8 +272,12 @@ export class GroupedReview {
   private render(): void {
     const escape = this.hooks.escape;
     const hiddenTests = this.isHidingTests ? this.files.filter((file) => isTestPath(file.diff.name)).length : 0;
-    const source = this.grouping?.source === 'ai' ? 'AI groups' : this.isGrouped && this.hooks.isAiAvailable() ? 'Rule groups' : '';
-    this.renderMeta([hiddenTests > 0 ? `${hiddenTests} test file${hiddenTests === 1 ? '' : 's'} hidden` : '', this.isGrouped ? source : ''].filter((part) => part !== '').join(' · '));
+    const isLoading = this.isGrouped && this.aiState === 'loading';
+    const source = this.grouping?.source === 'ai' ? 'AI groups' : this.aiState === 'failed' ? 'AI grouping failed · showing rule groups' : this.isGrouped && this.hooks.isAiAvailable() ? 'Rule groups' : '';
+    this.elements.bar.classList.toggle('ai-loading', isLoading);
+    const tests = hiddenTests > 0 ? `${hiddenTests} test file${hiddenTests === 1 ? '' : 's'} hidden` : '';
+    if (isLoading) this.elements.meta.innerHTML = `<span class="spinner"></span>Grouping by intent…${tests === '' ? '' : ` · ${escape(tests)}`}`;
+    else this.renderMeta([tests, this.isGrouped ? source : ''].filter((part) => part !== '').join(' · '));
     const groups = this.visibleGroups();
     this.elements.groups.hidden = !this.isGrouped || groups.length === 0;
     this.elements.summary.hidden = !this.isGrouped || groups.length === 0;
@@ -231,6 +294,10 @@ export class GroupedReview {
     const active = groups[this.activeIndex];
     const overall = this.grouping?.overallSummary;
     const markdown = (text: string): string => inlineMarkdown(text, escape);
+    if (isLoading) {
+      this.elements.summary.innerHTML = `<div class="review-loading skeleton" aria-busy="true"><span class="sk-line" style="width:88%"></span><span class="sk-line" style="width:64%"></span><span class="review-loading-note muted">Reading the diff to group files by intent. Rule groups below work in the meantime.</span></div>`;
+      return;
+    }
     this.elements.summary.innerHTML = active == null ? '' : `${this.activeIndex === 0 && overall != null && overall !== '' ? `<div class="review-overall">${markdown(overall)}</div>` : ''}<div class="review-group-text"><b>${escape(active.label)}</b>${active.isCritical ? '<span class="review-critical">Review carefully</span>' : ''} ${markdown(active.summary)}</div><div class="review-group-step muted">Group ${this.activeIndex + 1} of ${groups.length} · <kbd>⌥</kbd><kbd>]</kbd> next · <kbd>⌥</kbd><kbd>[</kbd> previous</div>`;
     this.elements.groups.querySelector('.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }

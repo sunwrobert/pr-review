@@ -72,3 +72,14 @@ describe('AI grouping response', () => {
     expect(prompt.length).toBeLessThan(140_000);
   });
 });
+
+describe('grouping cache key', () => {
+  test('diffFingerprint is stable for the same diff and changes when any hunk changes', async () => {
+    const { parsePatchFiles } = await import('@pierre/diffs');
+    const { diffFingerprint } = await import('./grouped-review');
+    const parse = (patch: string) => parsePatchFiles(patch, 'k').flatMap((parsed) => parsed.files).map((diff, index) => ({ id: `${index}:${diff.name}`, diff, additions: 1, deletions: 1 }));
+    const patch = (line: string) => `diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1,1 +1,1 @@\n-old\n+${line}\n`;
+    expect(diffFingerprint(parse(patch('new')))).toBe(diffFingerprint(parse(patch('new'))));
+    expect(diffFingerprint(parse(patch('new')))).not.toBe(diffFingerprint(parse(patch('newer'))));
+  });
+});
