@@ -14,9 +14,9 @@
             <img class="logo" src="/favicon.png" alt="" data-tauri-drag-region />
             <h2 id="view-title" class="sr-only">Created by me</h2>
             <nav class="views view-pills h-scroll">
-              <button data-kind="mine" class="active" title="Created by me  ⌘3">Mine <span class="count" data-count="mine"></span></button>
-              <button data-kind="review" title="Review requested  ⌘1">Review <span class="count" data-count="review"></span></button>
-              <button data-kind="involved" title="Involved  ⌘2">Involved <span class="count" data-count="involved"></span></button>
+              <button data-kind="mine" class="active" title="Created by me">Mine <span class="count" data-count="mine"></span></button>
+              <button data-kind="review" title="Review requested">Review <span class="count" data-count="review"></span></button>
+              <button data-kind="involved" title="Involved">Involved <span class="count" data-count="involved"></span></button>
             </nav>
             <button id="refresh-button" class="icon-button refresh-button" title="Refresh  ⌘R"><i data-icon="refresh"></i></button>
             <span id="refresh-status" class="refresh-status"></span>
@@ -142,11 +142,11 @@
       <form method="dialog">
         <div class="dialog-title" id="close-title"></div>
         <ol id="close-list" class="bulk-list"></ol>
-        <textarea id="close-comment" rows="3" placeholder="Optional comment, posted before closing (markdown, @mentions work)" spellcheck="true"></textarea>
+        <textarea id="close-comment" rows="3" placeholder="Optional comment, posted before closing (markdown, @mentions work, ⇧↵ for a new line)" spellcheck="true"></textarea>
         <p class="muted close-note">The branch is kept, and you can reopen the PR on GitHub.</p>
         <menu>
           <button value="cancel" class="ghost" type="button" id="close-cancel">Cancel <kbd>esc</kbd></button>
-          <button value="ok" class="primary danger" type="button" id="close-confirm"><span id="close-confirm-label">Close</span> <kbd>⌘</kbd><kbd>↵</kbd></button>
+          <button value="ok" class="primary danger" type="button" id="close-confirm"><span id="close-confirm-label">Close</span> <kbd>↵</kbd></button>
         </menu>
       </form>
     </dialog>

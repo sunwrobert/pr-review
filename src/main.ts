@@ -2998,14 +2998,14 @@ const COMMANDS: Command[] = [
   { id: 'check-clear', section: 'Select', title: 'Clear selection', keys: ['esc', '⌫'], run: clearChecked, isEnabled: () => state.checkedIds.size > 0 },
   { id: 'bulk-approve', section: 'Select', title: 'Approve selected', aliases: 'bulk lgtm', keys: ['⇧a'], run: () => void bulkApprove(), isEnabled: () => state.checkedIds.size > 0 },
 
-  { id: 'view-review', section: 'Views', title: 'Go to Review requested', keys: ['⌘1', 'g r'], run: () => switchKind('review') },
-  { id: 'view-involved', section: 'Views', title: 'Go to Involved', keys: ['⌘2', 'g i'], run: () => switchKind('involved') },
-  { id: 'view-mine', section: 'Views', title: 'Go to Created by me', keys: ['⌘3', 'g m'], run: () => switchKind('mine') },
+  { id: 'view-review', section: 'Views', title: 'Go to Review requested', keys: [], run: () => switchKind('review') },
+  { id: 'view-involved', section: 'Views', title: 'Go to Involved', keys: [], run: () => switchKind('involved') },
+  { id: 'view-mine', section: 'Views', title: 'Go to Created by me', keys: [], run: () => switchKind('mine') },
 
   { id: 'toggle-sidebar', section: 'Layout', title: 'Toggle pull request list', aliases: 'hide show pane sidebar navigation queue inbox', keys: ['⌘b', '⌘\\'], run: () => layout.toggle('list') },
-  { id: 'layout-review', section: 'Layout', title: 'Layout: review (list 24% · description 36% · diff)', aliases: 'preset pane default balanced', keys: ['1', '⌘⌥1'], run: () => applyLayoutPreset('review') },
-  { id: 'layout-diff', section: 'Layout', title: 'Layout: diff focus (list minimal · description 26% · diff)', aliases: 'preset pane code wide', keys: ['2', '⌘⌥2'], run: () => applyLayoutPreset('diff') },
-  { id: 'layout-read', section: 'Layout', title: 'Layout: read description (list minimal · description 62% · diff)', aliases: 'preset pane body middle', keys: ['3', '⌘⌥3'], run: () => applyLayoutPreset('read') },
+  { id: 'layout-review', section: 'Layout', title: 'Layout: review (list 24% · description 36% · diff)', aliases: 'preset pane default balanced', keys: ['⌘1', '1'], run: () => applyLayoutPreset('review') },
+  { id: 'layout-diff', section: 'Layout', title: 'Layout: diff focus (list minimal · description 26% · diff)', aliases: 'preset pane code wide', keys: ['⌘2', '2'], run: () => applyLayoutPreset('diff') },
+  { id: 'layout-read', section: 'Layout', title: 'Layout: read description (list minimal · description 62% · diff)', aliases: 'preset pane body middle', keys: ['⌘3', '3'], run: () => applyLayoutPreset('read') },
   { id: 'focus-mode', section: 'Layout', title: 'Focus mode (hide all panels)', aliases: 'zen fullscreen hide panes', keys: ['⌘.', 'z'], run: () => layout.toggleFocus() },
   { id: 'theme', section: 'Layout', title: 'Choose theme', aliases: 'light dark mode appearance color catppuccin dracula tokyo night nord gruvbox github solarized monokai rose pine one dark', keys: ['t', '⌘⇧l'], run: openThemePicker },
   { id: 'reset-layout', section: 'Layout', title: 'Reset layout', aliases: 'panes widths default', keys: ['⌘⇧0'], run: () => layout.reset() },
@@ -3214,8 +3214,9 @@ dom.bulkClose.addEventListener('click', openCloseDialog);
 dom.closePull.addEventListener('click', openCloseDialog);
 dom.closeConfirm.addEventListener('click', () => void confirmClose());
 element('close-cancel').addEventListener('click', () => dom.closeDialog.close());
+// ↵ confirms like the merge dialogs; ⇧↵ adds a line to the optional comment.
 dom.closeDialog.addEventListener('keydown', (event) => {
-  if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey)) return;
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing) return;
   event.preventDefault();
   event.stopPropagation();
   void confirmClose();
