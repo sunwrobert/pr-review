@@ -2705,6 +2705,26 @@ function openSelectedOnGitHub(): void {
   );
 }
 
+/** ⌘C keeps its normal meaning while text in the description, diff or a dialog is highlighted. */
+function hasTextSelection(): boolean {
+  const selection = document.getSelection();
+  return selection != null && !selection.isCollapsed && selection.toString().trim() !== '';
+}
+
+/** The checked PRs in list order (or the open one when nothing is checked), copied as one linked title per line. */
+function copyPullLinks(): void {
+  const checked = state.checkedIds;
+  const pulls = checked.size > 0 ? [...visiblePulls().filter((pull) => checked.has(pull.id)), ...checkedPulls().filter((pull) => !visiblePulls().includes(pull))] : [selectedPull()].filter((pull): pull is PullRequest => pull != null);
+  if (pulls.length === 0) return;
+  const markdown = pulls.map((pull) => `[${pull.title.replace(/[[\]]/g, '\\$&')}](${pull.url})`).join('\n');
+  const html = pulls.map((pull) => `<a href="${escapeHtml(pull.url)}">${escapeHtml(pull.title)}</a>`).join('<br>');
+  const label = pulls.length === 1 ? `#${pulls[0]?.number ?? ''}` : `${pulls.length} PRs`;
+  const done = (): void => toast(`Copied ${label} as links`);
+  const plainOnly = (): void => void navigator.clipboard.writeText(markdown).then(done, () => toast('Clipboard unavailable', true));
+  if (typeof ClipboardItem === 'undefined') return plainOnly();
+  void navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([markdown], { type: 'text/plain' }) })]).then(done, plainOnly);
+}
+
 function copyText(text: string, label: string): void {
   void navigator.clipboard.writeText(text).then(
     () => toast(`Copied ${label}: ${text}`),
@@ -3044,6 +3064,7 @@ const COMMANDS: Command[] = [
   { id: 'merge', section: 'Pull request', title: 'Merge (all selected when several are checked)', aliases: 'squash ship land queue', keys: ['⌘↵', 'm'], run: () => void (state.checkedIds.size > 0 ? bulkMerge() : mergeSelected()), isEnabled: () => hasPull() || state.checkedIds.size > 0 },
   { id: 'fix-prompt', section: 'Pull request', title: 'Needs attention → copy agent prompt', aliases: 'triage unapproved broken red failing ci conflict agent devin claude codex prompt clipboard review', keys: ['⇧x'], run: openTriage },
   { id: 'open', section: 'Pull request', title: 'Open on GitHub', aliases: 'browser link url web', keys: ['o', '⌘o', 'g o'], run: openSelectedOnGitHub, isEnabled: hasPull },
+  { id: 'copy-links', section: 'Select', title: 'Copy selected PRs as linked titles, one per line', aliases: 'copy list links titles markdown share slack', keys: ['⌘c'], run: copyPullLinks, isEnabled: () => (state.checkedIds.size > 0 || hasPull()) && !hasTextSelection() },
   { id: 'copy-url', section: 'Pull request', title: 'Copy link', keys: ['⌘⇧c', 'y'], run: () => { const pull = selectedPull(); if (pull != null) copyText(pull.url, 'link'); }, isEnabled: hasPull },
   { id: 'copy-branch', section: 'Pull request', title: 'Copy branch name', keys: ['⌘⇧.', 'b'], run: () => { const pull = selectedPull(); if (pull != null) copyText(pull.headRefName, 'branch'); }, isEnabled: hasPull },
 ];
