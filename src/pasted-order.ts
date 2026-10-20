@@ -5,7 +5,11 @@ export interface PastedOrder {
   headings: Map<number, string>;
 }
 
-const PR_REFERENCE = /(?:\/pull\/|(?<![\w/])#)(\d{1,7})\b/g;
+/**
+ * `/pull/123`, a bare `#123`, or GitHub's short form `repo#123` / `owner/repo#123`.
+ * A `#` after a dot, slash or other punctuation (`page.md#2`, `https://x.dev/#12`) is an anchor, not a PR.
+ */
+const PR_REFERENCE = /(?:\/pull\/|(?:^|[^\w./#-])(?:[\w.-]+\/)?[\w-]*#)(\d{1,7})\b/g;
 const HEADING = /^(?!\s*[-*•]|\s*\d+[.)]\s)(.{2,80}?)\s*$/;
 
 const DEPENDENCY_WORDS = /\b(?:stacked on|base(?: for)?|depends on|after|blocked by|its base|see)\b/i;

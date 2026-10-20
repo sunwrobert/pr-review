@@ -56,3 +56,14 @@ describe('applyPastedOrder', () => {
     );
   });
 });
+
+describe('repo-qualified references', () => {
+  test('reads repo#123 and owner/repo#123 lines, keeping the label after the dash out of headings', () => {
+    const text = 'openrouter-web#52060 — tooling-scripts\nopenrouter-web#52063 — mc-support\nOpenRouterTeam/openrouter-web#52080 — workflow\n- see acme/web#7';
+    expect(parsePastedOrder(text).numbers).toEqual([52060, 52063, 52080, 7]);
+  });
+
+  test('still ignores anchors and fragments that are not PR references', () => {
+    expect(parsePastedOrder('docs/page.md#section-2\nhttps://x.dev/#12\n#300 real\n#301 real').numbers).toEqual([300, 301]);
+  });
+});
