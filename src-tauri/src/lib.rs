@@ -15,6 +15,8 @@ const QUEUE_FIELDS: &str = r#"
 }"#;
 
 const MAX_MERGE_STATE_IDS: usize = 25;
+/// GitHub's search resolver times out (HTTP 502) on 100-node pages with this field set for big queues; 50 stays well clear.
+const QUEUE_PAGE_SIZE: usize = 50;
 
 const MAX_DIFF_FALLBACK_FILES: usize = 3000;
 const GH_TIMEOUT_SECS: u64 = 45;
@@ -62,6 +64,22 @@ const GH_RETRY_DELAYS_MS: [u64; 3] = [400, 1_200, 3_000];
 static GH_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(GH_MAX_CONCURRENT);
 
 /** Failures that happen before the request leaves the machine, so retrying can never repeat a mutation. */
+/// GitHub's gateway gave up on the request (it often succeeds on the next try). Only safe to retry for reads.
+fn is_gateway_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    ["http 502", "http 503", "http 504", "502 bad gateway", "503 service unavailable", "504 gateway time"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+}
+
+/// `gh api graphql` with a query (not a mutation), or a plain `gh api` GET: safe to repeat.
+fn is_read_request(args: &[&str]) -> bool {
+    if args.first() != Some(&"api") || args.iter().any(|arg| matches!(*arg, "-X" | "--method")) {
+        return false;
+    }
+    !args.iter().any(|arg| arg.starts_with("query=mutation") || arg.starts_with("query=mutation("))
+}
+
 fn is_retryable_network_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     ["tls handshake timeout", "dial tcp", "connection refused", "no such host", "network is unreachable", "temporary failure in name resolution"]
@@ -77,7 +95,7 @@ async fn gh(args: &[&str]) -> Result<String, String> {
             gh_once(args).await
         };
         match result {
-            Err(message) if attempt < GH_RETRY_DELAYS_MS.len() && is_retryable_network_error(&message) => {
+            Err(message) if attempt < GH_RETRY_DELAYS_MS.len() && (is_retryable_network_error(&message) || (is_gateway_error(&message) && is_read_request(args))) => {
                 tokio::time::sleep(std::time::Duration::from_millis(GH_RETRY_DELAYS_MS[attempt])).await;
                 attempt += 1;
             }
@@ -131,7 +149,7 @@ fn search_query(kind: QueueKind) -> &'static str {
 #[tauri::command]
 async fn queue(kind: QueueKind) -> Result<String, String> {
     let query = format!(
-        "query($q: String!, $endCursor: String) {{ search(query: $q, type: ISSUE, first: 100, after: $endCursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {QUEUE_FIELDS} }} }} }}"
+        "query($q: String!, $endCursor: String) {{ search(query: $q, type: ISSUE, first: {QUEUE_PAGE_SIZE}, after: $endCursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {QUEUE_FIELDS} }} }} }}"
     );
     gh(&["api", "graphql", "--paginate", "--slurp", "-f", &format!("query={query}"), "-f", &format!("q={}", search_query(kind))]).await
 }
@@ -583,7 +601,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::is_retryable_network_error;
+    use super::{is_gateway_error, is_read_request, is_retryable_network_error};
 
     #[test]
     fn retries_only_failures_before_the_request_is_sent() {
@@ -592,5 +610,17 @@ mod tests {
         assert!(!is_retryable_network_error("HTTP 502: Bad Gateway"));
         assert!(!is_retryable_network_error("read tcp 10.0.0.2:5000->140.82.112.6:443: read: connection reset by peer"));
         assert!(!is_retryable_network_error("GraphQL: Pull request is not mergeable"));
+    }
+
+    #[test]
+    fn retries_gateway_errors_only_for_reads() {
+        assert!(is_gateway_error("gh: HTTP 502: Bad Gateway (https://api.github.com/graphql)"));
+        assert!(is_gateway_error("<html><head><title>502 Bad Gateway</title></head>"));
+        assert!(!is_gateway_error("HTTP 404: Not Found"));
+        assert!(is_read_request(&["api", "graphql", "--paginate", "-f", "query=query($q: String!) { search }"]));
+        assert!(is_read_request(&["api", "repos/o/r/pulls/1/files"]));
+        assert!(!is_read_request(&["api", "graphql", "-f", "query=mutation($id: ID!) { enqueuePullRequest }"]));
+        assert!(!is_read_request(&["api", "repos/o/r/issues/1/comments", "-X", "POST"]));
+        assert!(!is_read_request(&["pr", "merge", "1", "-R", "o/r", "--squash"]));
     }
 }
