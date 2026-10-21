@@ -1,17 +1,18 @@
 import { hydrateIcons, icon } from './icons';
 import { attachScrollFade } from './scroll-fade';
 import { startAutoUpdate } from './updater';
+import { collectStack, findStacks, orderByStacks, type StackSlot } from './stacks';
 import { StableOrder } from './stable-order';
 import { forgetThreads, loadThreads, replyToThread, setThreadResolved, type ReviewThread } from './threads';
 import { findInDiff, findInDom, type FindHit } from './find-in-pr';
-import { applyPastedOrder, parsePastedOrder, type PastedOrder } from './pasted-order';
+import { applyPastedOrder, parsePastedOrder, parsePullReference, type PastedOrder } from './pasted-order';
 import { watchKbdGlyphs } from './kbd-glyphs';
 import { animateDialogCancel, flash, glideScrollBy, glideScrollTo, setVisibleWithMotion } from './motion';
 import { buildAgentPrompt, isConflicted, isFailing, isTriageCandidate, needsAttention, prStatus, TRIAGE_META, TRIAGE_ORDER, triageReasons, type TriageReason } from './status';
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
-import { approvePull, closePull, commentOnPull, messageDevinSession, fetchViewerLogin, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchQueue, type MergeState, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
+import { approvePull, closePull, commentOnPull, messageDevinSession, fetchViewerLogin, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchPull, fetchQueue, fetchStackNeighbors, type MergeState, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
 import { GroupedReview } from './grouped-review';
 import { groupWithAi } from './file-grouping-ai';
 import type { FileGrouping, PromptFile } from './file-groups';
@@ -333,7 +334,7 @@ function invalidateList(): void {
 }
 
 function currentListKey(): string {
-  return [listVersion, leaving.size, pastedOrder?.numbers.length ?? -1, state.pulls, state.filter, state.smartFilter, state.sortOrder, isGrouped, groups, semanticQuery, semanticScores, aiResults.size, collapsedGroups.size].map((part) => (typeof part === 'object' ? objectId(part) : String(part))).join('|');
+  return [listVersion, leaving.size, pastedOrder?.numbers.length ?? -1, listedPulls(), state.filter, state.smartFilter, state.sortOrder, isGrouped, groups, semanticQuery, semanticScores, aiResults.size, collapsedGroups.size].map((part) => (typeof part === 'object' ? objectId(part) : String(part))).join('|');
 }
 
 const objectIds = new WeakMap<object, number>();
@@ -354,15 +355,20 @@ function withLeaving(ranked: PullRequest[]): PullRequest[] {
   return [...ranked, ...[...leaving.values()].filter((entry) => !present.has(entry.pull.id)).map((entry) => entry.pull)];
 }
 
+let stackSlots: Map<string, StackSlot> = new Map();
+
 function computeLists(): void {
   const key = currentListKey();
   if (key === listCacheKey) return;
   listCacheKey = key;
+  const pulls = listedPulls();
+  stackSlots = findStacks(pulls);
   const needle = state.filter.trim().toLowerCase();
   const now = Date.now();
-  const matching = state.pulls.filter((pull) => (state.smartFilter === 'attention' ? isMergeStateSettled(pull) && needsAttention(pull) : state.smartFilter === 'tested' ? isTested(pull) : matchesSmartFilter(pull, state.smartFilter, now)) && matchesText(pull, needle));
+  const pasted = new Set(pastedOrder?.numbers ?? []);
+  const matching = pulls.filter((pull) => (pasted.has(pull.number) || (state.smartFilter === 'attention' ? isMergeStateSettled(pull) && needsAttention(pull) : state.smartFilter === 'tested' ? isTested(pull) : matchesSmartFilter(pull, state.smartFilter, now))) && matchesText(pull, needle));
   const ranked = sortPulls(matching, state.sortOrder, now, aiScoreFor);
-  filteredCache = pastedOrder != null ? withLeaving(applyPastedOrder(ranked, pastedOrder)) : stableOrder.apply(withLeaving(ranked), [state.kind, state.smartFilter, state.sortOrder, needle, isGrouped].join('|'));
+  filteredCache = pastedOrder != null ? withLeaving(applyPastedOrder(orderByStacks(ranked, stackSlots), pastedOrder)) : orderByStacks(stableOrder.apply(withLeaving(ranked), [state.kind, state.smartFilter, state.sortOrder, needle, isGrouped].join('|')), stackSlots);
   visibleCache = !isGrouped || groups.length === 0 ? filteredCache : listSections(filteredCache).flatMap((section) => (section.group != null && collapsedGroups.has(section.group.id) ? [] : section.pulls));
 }
 
@@ -398,14 +404,30 @@ function renderSmartCounts(): void {
   dom.sort.value = state.sortOrder;
 }
 
+/** PRs a pasted link pulled in from outside this view (the rest of its stack); cleared with the pasted order. */
+let pastedExtras: PullRequest[] = [];
+let listedSource: [PullRequest[], PullRequest[]] | null = null;
+let listedCache: PullRequest[] = [];
+
+/** The view's PRs plus any pasted extras it doesn't already have. */
+function listedPulls(): PullRequest[] {
+  if (listedSource?.[0] === state.pulls && listedSource[1] === pastedExtras) return listedCache;
+  listedSource = [state.pulls, pastedExtras];
+  const present = new Set(state.pulls.map((pull) => pull.id));
+  const extras = pastedExtras.filter((pull) => !present.has(pull.id));
+  listedCache = extras.length === 0 ? state.pulls : [...state.pulls, ...extras];
+  return listedCache;
+}
+
 let pullIndexSource: PullRequest[] | null = null;
 let pullIndex = new Map<string, PullRequest>();
 
 function pullById(id: string | null): PullRequest | undefined {
   if (id == null) return undefined;
-  if (pullIndexSource !== state.pulls) {
-    pullIndexSource = state.pulls;
-    pullIndex = new Map(state.pulls.map((pull) => [pull.id, pull]));
+  const pulls = listedPulls();
+  if (pullIndexSource !== pulls) {
+    pullIndexSource = pulls;
+    pullIndex = new Map(pulls.map((pull) => [pull.id, pull]));
   }
   return pullIndex.get(id);
 }
@@ -607,14 +629,30 @@ const GROUP_ROW_HEIGHT = 34;
 const STATUS_ROW_HEIGHT = 34;
 const virtualList = new VirtualList(dom.list);
 
-function rowHtml(pull: PullRequest, primaryRepo: string | undefined, needle: string): string {
+/** Stack rail classes: which neighbours in the list belong to the same stack, so the rail joins them. */
+function stackClasses(pulls: readonly PullRequest[], index: number): string {
+  const stackId = stackSlots.get(pulls[index]!.id)?.stackId;
+  if (stackId == null) return '';
+  const isJoinedUp = index > 0 && stackSlots.get(pulls[index - 1]!.id)?.stackId === stackId;
+  const isJoinedDown = index < pulls.length - 1 && stackSlots.get(pulls[index + 1]!.id)?.stackId === stackId;
+  return ` in-stack${isJoinedUp ? ' stack-up' : ''}${isJoinedDown ? ' stack-down' : ''}`;
+}
+
+function stackPill(pull: PullRequest): string {
+  const slot = stackSlots.get(pull.id);
+  if (slot == null) return '';
+  const position = slot.index === 0 ? 'bottom, merges first' : slot.index === slot.size - 1 ? 'top' : `on ${pull.baseRefName}`;
+  return `<span class="stack-pill" title="Stacked PR ${slot.index + 1} of ${slot.size} (${escapeHtml(position)})">${icon('layers')}${slot.index + 1}/${slot.size}</span>`;
+}
+
+function rowHtml(pull: PullRequest, primaryRepo: string | undefined, needle: string, stackClass = ''): string {
   const isChecked = state.checkedIds.has(pull.id);
   const exit = leaving.get(pull.id);
-  return `<li data-key="${pull.id}" data-id="${pull.id}" class="${pull.id === state.selectedId ? 'selected' : ''}${isChecked ? ' checked' : ''}${pull.queueEntry != null ? ' queued' : ''}${exit != null ? ' leaving' : ''}${exit?.isPending === true ? ' pending' : ''}${failedMerges.has(pull.id) ? ' merge-failed' : ''}"${exit != null ? ` data-leaving="${escapeHtml(exit.label)}"` : ''}>
+  return `<li data-key="${pull.id}" data-id="${pull.id}" class="${pull.id === state.selectedId ? 'selected' : ''}${stackClass}${isChecked ? ' checked' : ''}${pull.queueEntry != null ? ' queued' : ''}${exit != null ? ' leaving' : ''}${exit?.isPending === true ? ' pending' : ''}${failedMerges.has(pull.id) ? ' merge-failed' : ''}"${exit != null ? ` data-leaving="${escapeHtml(exit.label)}"` : ''}>
         <span class="check-box" data-check="${pull.id}" role="checkbox" aria-checked="${isChecked}" title="Select  E / ⇧V"></span>
         ${statusIcon(pull)}
         <span class="id" title="${escapeHtml(pull.repository.nameWithOwner)}">${repoTag(pull, primaryRepo)}#${pull.number}</span>
-        <span class="t">${escapeHtml(pull.title)}</span>
+        <span class="t">${stackPill(pull)}${escapeHtml(pull.title)}</span>
         <span class="right">${(pull.openThreads ?? 0) > 0 ? `<span class="thread-pill" title="${pull.openThreads} unresolved thread${pull.openThreads === 1 ? '' : 's'}  ⇧C">${icon('comment')}${pull.openThreads}</span>` : ''}${pull.queueEntry != null ? `<span class="queue-pill" title="${escapeHtml(queueLabel(pull))}">Queued</span>` : ''}${readinessDot(pull)}${checksIcon(pull)}<span class="delta"><i class="add">+${pull.additions}</i> <i class="del">−${pull.deletions}</i></span><span class="age">${relativeTime(pull.updatedAt)}</span>${avatar(pull)}</span>
       </li>`;
 }
@@ -652,7 +690,10 @@ function renderList(): void {
     const group = section.group;
     if (group != null) rows.push({ key: `group:${group.id}`, height: GROUP_ROW_HEIGHT, render: () => groupHeader(section).replace('<li ', `<li data-key="group:${escapeHtml(group.id)}" `) });
     if (section.group != null && collapsedGroups.has(section.group.id)) continue;
-    for (const pull of section.pulls) rows.push({ key: pull.id, height: ROW_HEIGHT, render: () => rowHtml(pull, primaryRepo, needle) });
+    section.pulls.forEach((pull, index) => {
+      const stackClass = stackClasses(section.pulls, index);
+      rows.push({ key: pull.id, height: ROW_HEIGHT, render: () => rowHtml(pull, primaryRepo, needle, stackClass) });
+    });
   }
   dom.list.classList.toggle('grouped', isGrouped && groups.length > 0);
   virtualList.setRows(rows);
@@ -927,15 +968,28 @@ function jumpToThread(threadId: string): void {
   else diffView.scrollToFile(file.id);
 }
 
-function focusFirstOpenThread(): void {
+/** ⇧C: marks the next open thread (cycling) and says which one, so it reads even when the thread is already on screen. */
+function focusNextOpenThread(): void {
   const section = dom.descPane.querySelector<HTMLElement>('[data-threads]');
-  const first = section?.querySelector<HTMLElement>('.thread:not(.is-resolved)') ?? (currentThreads.length > 0 ? section?.querySelector<HTMLElement>('.conversation-head') : null);
-  if (section == null || first == null) {
-    toast(`No review threads on #${selectedPull()?.number ?? ""}`);
+  const threads = [...(section?.querySelectorAll<HTMLElement>('.thread:not(.is-resolved)') ?? [])];
+  const number = selectedPull()?.number ?? '';
+  if (section == null || threads.length === 0) {
+    const head = currentThreads.length > 0 ? section?.querySelector<HTMLElement>('.conversation-head') : null;
+    if (head != null) scrollDescriptionTo(head);
+    toast(currentThreads.length > 0 ? `All review threads resolved on #${number}` : `No review threads on #${number}`);
     return;
   }
-  glideScrollTo(dom.descPane, dom.descPane.scrollTop + first.getBoundingClientRect().top - dom.descPane.getBoundingClientRect().top - 12);
-  flash(first);
+  const index = (threads.findIndex((thread) => thread.classList.contains('is-active')) + 1) % threads.length;
+  threads.forEach((thread, position) => thread.classList.toggle('is-active', position === index));
+  const target = threads[index]!;
+  scrollDescriptionTo(target);
+  flash(target);
+  const thread = currentThreads.find((candidate) => candidate.id === target.dataset.thread);
+  toast(`Open thread ${index + 1} of ${threads.length}${thread == null ? '' : ` · ${thread.path}${thread.line != null ? `:${thread.line}` : ''}`}${threads.length > 1 ? ' · ⇧C next' : ''}`);
+}
+
+function scrollDescriptionTo(element: HTMLElement): void {
+  glideScrollTo(dom.descPane, dom.descPane.scrollTop + element.getBoundingClientRect().top - dom.descPane.getBoundingClientRect().top - 12);
 }
 
 dom.descPane.addEventListener('click', (event) => {
@@ -1165,7 +1219,7 @@ function renderDetailMeta(pull: PullRequest): void {
 function syncQueueState(pull: PullRequest): void {
   isSelectedQueued = false;
   syncMergeLabel();
-  void usesMergeQueue(pull).then((isQueued) => {
+  void usesMergeQueue(pull, queueBase(pull)).then((isQueued) => {
     if (selectedPull()?.id !== pull.id) return;
     isSelectedQueued = isQueued;
     syncMergeLabel();
@@ -1863,6 +1917,7 @@ function wireFindBar(): void {
 
 function setPastedOrder(order: PastedOrder | null): void {
   pastedOrder = order;
+  if (order == null) pastedExtras = [];
   if (order == null) localStorage.removeItem(PASTED_ORDER_KEY);
   else localStorage.setItem(PASTED_ORDER_KEY, JSON.stringify({ numbers: order.numbers, headings: [...order.headings] }));
   invalidateList();
@@ -1883,12 +1938,46 @@ function renderPastedChip(): void {
 
 function applyPastedText(text: string): boolean {
   const order = parsePastedOrder(text);
+  if (order.numbers.length === 1) {
+    const reference = parsePullReference(text, mostCommonRepo());
+    if (reference == null) return false;
+    void showPastedStack(reference.repo, reference.number);
+    return true;
+  }
   if (order.numbers.length < 2) return false;
   setPastedOrder(order);
   const matched = state.pulls.filter((pull) => order.numbers.includes(pull.number)).length;
   const missing = order.numbers.length - matched;
   toast(`Sorted by your list · ${matched} PR${matched === 1 ? '' : 's'} in this view${missing > 0 ? ` · ${missing} not here (other view or closed)` : ''} · ⌥⌫ to clear`);
   return true;
+}
+
+let pastedStackToken = 0;
+
+/** A pasted single PR: lists it with every open PR in its stack, bottom first, fetching any this view doesn't have. */
+async function showPastedStack(repo: string, number: number): Promise<void> {
+  const token = ++pastedStackToken;
+  toast(`Finding the stack for ${repo}#${number}…`);
+  try {
+    const { pull, isOpen, stack } = await fetchPull(repo, number);
+    if (token !== pastedStackToken) return;
+    if (!isOpen) {
+      toast(`${repo}#${number} is already merged or closed`, true);
+      return;
+    }
+    const members = stack != null ? stack.pulls : await collectStack(pull, fetchStackNeighbors);
+    if (token !== pastedStackToken) return;
+    if (stack != null) members.forEach((member) => nativeStackBase.set(member.id, stack.baseRefName));
+    const ordered = stack != null ? members : orderByStacks(members, findStacks(members));
+    const heading = ordered.length > 1 ? `Stack of #${number}` : `#${number}`;
+    pastedExtras = ordered;
+    setPastedOrder({ numbers: ordered.map((member) => member.number), headings: new Map(ordered.map((member) => [member.number, heading])) });
+    const pasted = pullById(pull.id);
+    if (pasted != null) void select(pasted);
+    toast(ordered.length > 1 ? `Stack of #${number} · ${ordered.length} open PRs, bottom first · ⌥⌫ to clear` : `#${number} is not stacked · ⌥⌫ to clear`);
+  } catch (error) {
+    if (token === pastedStackToken) toast(`Could not load ${repo}#${number}: ${errorMessage(error)}`, true);
+  }
 }
 
 document.addEventListener('paste', (event) => {
@@ -2133,7 +2222,7 @@ const MERGE_CONCURRENCY = 3;
 async function runMerge(pull: PullRequest, isQueued: boolean): Promise<string | null> {
   markPending(pull, isQueued ? 'Queueing…' : 'Merging…');
   try {
-    await mergePull(pull, MERGE_METHOD);
+    await mergePull(pull, MERGE_METHOD, isQueued);
     markLeaving(pull, isQueued ? 'Queued' : 'Merged');
     return null;
   } catch (error) {
@@ -2152,10 +2241,33 @@ async function recheckMergeState(pull: PullRequest): Promise<void> {
   if (fresh != null && isConflicted(fresh) && !isConflicted(pull)) toast(`#${pull.number} now has merge conflicts with ${pull.baseRefName}`, true);
 }
 
+/** A stacked PR merges with everything below it, so per stack only the highest checked PR is sent. */
+/** GitHub's native stack base for pasted stacks. */
+const nativeStackBase = new Map<string, string>();
+
+/** The branch a merge lands on: a stacked PR merges into its stack's base (usually main), not the branch below it. */
+function queueBase(pull: PullRequest): string {
+  const slot = stackSlots.get(pull.id);
+  return nativeStackBase.get(pull.id) ?? (slot == null ? undefined : pullById(slot.stackId)?.baseRefName) ?? pull.baseRefName;
+}
+
+function topOfEachStack(pulls: PullRequest[]): PullRequest[] {
+  const top = new Map<string, PullRequest>();
+  pulls.forEach((pull) => {
+    const slot = stackSlots.get(pull.id);
+    const current = slot == null ? undefined : top.get(slot.stackId);
+    if (slot != null && (current == null || (stackSlots.get(current.id)?.index ?? 0) < slot.index)) top.set(slot.stackId, pull);
+  });
+  return pulls.filter((pull) => {
+    const slot = stackSlots.get(pull.id);
+    return slot == null || top.get(slot.stackId) === pull;
+  });
+}
+
 async function bulkMerge(): Promise<void> {
-  const pulls = checkedPulls().filter((pull) => !pull.isDraft && pull.mergeable !== 'CONFLICTING' && !leaving.has(pull.id));
+  const pulls = topOfEachStack(checkedPulls().filter((pull) => !pull.isDraft && pull.mergeable !== 'CONFLICTING' && !leaving.has(pull.id)));
   if (pulls.length === 0) return;
-  const queueFlags = await Promise.all(pulls.map(usesMergeQueue));
+  const queueFlags = await Promise.all(pulls.map((pull) => usesMergeQueue(pull, queueBase(pull))));
   const isAllQueued = queueFlags.every(Boolean);
   if (!isAllQueued && !(await confirmBulkMerge(pulls, MERGE_METHOD))) return;
   const verb = isAllQueued ? 'Queued' : 'Merged';
@@ -2227,11 +2339,13 @@ function confirmMerge(pull: PullRequest, method: MergeMethod): Promise<boolean> 
 async function mergeSelected(): Promise<void> {
   const pull = selectedPull();
   if (pull == null || dom.merge.disabled || leaving.has(pull.id)) return;
-  const isQueued = await usesMergeQueue(pull);
+  const isQueued = await usesMergeQueue(pull, queueBase(pull));
   if (!isQueued && !(await confirmMerge(pull, MERGE_METHOD))) return;
   const failure = await runMerge(pull, isQueued);
+  const below = stackSlots.get(pull.id)?.index ?? 0;
+  const withBelow = below > 0 ? ` with the ${below} stacked below it` : '';
   if (failure != null) toast(`Merge #${pull.number} failed: ${failure.replace(/^#\d+: /, '')}`, true);
-  else toast(isQueued ? `#${pull.number} added to the merge queue` : `Merged #${pull.number}`);
+  else toast(isQueued ? `#${pull.number}${withBelow} added to the merge queue` : `Merged #${pull.number}${withBelow}`);
   void refresh(state.kind);
 }
 
@@ -2950,7 +3064,7 @@ dom.commentDialog.addEventListener('cancel', (event) => {
 dom.commentSend.addEventListener('click', () => void submitComment());
 element('comment-cancel').addEventListener('click', closeCommentDialog);
 element('comment-button').addEventListener('click', openCommentDialog);
-element('threads-button').addEventListener('click', focusFirstOpenThread);
+element('threads-button').addEventListener('click', focusNextOpenThread);
 element('open-devin').addEventListener('click', () => void openDevinSession());
 element('message-devin').addEventListener('click', () => void openDevinMessageDialog());
 dom.statusBar.addEventListener('click', (event) => {
@@ -3057,7 +3171,7 @@ const COMMANDS: Command[] = [
   { id: 'toggle-bots', section: 'Pull request', title: 'Show / hide bot comments', aliases: 'devin perry github-actions automated comments conversation', keys: ['⇧b'], run: () => { showBotComments = !showBotComments; localStorage.setItem('showBotComments', showBotComments ? '1' : '0'); const pull = selectedPull(); if (pull != null) renderDetail(pull); toast(showBotComments ? 'Showing bot comments' : 'Hiding bot comments'); } },
   { id: 'diff-style', section: 'Diff', title: 'Toggle split / unified diff', aliases: 'side by side inline view', keys: ['s', '⌘⌥s'], run: toggleStyle },
 
-  { id: 'open-threads', section: 'Pull request', title: 'Jump to open review threads', aliases: 'unresolved comments threads review feedback resolve', keys: ['⇧c'], run: focusFirstOpenThread, isEnabled: hasPull },
+  { id: 'open-threads', section: 'Pull request', title: 'Next open review thread', aliases: 'unresolved comments threads review feedback resolve', keys: ['⇧c'], run: focusNextOpenThread, isEnabled: hasPull },
   { id: 'comment', section: 'Pull request', title: 'Write a comment', aliases: 'reply message mention devin note', keys: ['c'], run: openCommentDialog, isEnabled: hasPull },
   { id: 'approve', section: 'Pull request', title: 'Approve', aliases: 'lgtm review accept', keys: ['a'], run: () => void approveSelected(), isEnabled: () => { const pull = selectedPull(); return pull != null && !isOwnPull(pull); } },
   { id: 'close', section: 'Pull request', title: 'Close (all selected when several are checked)', aliases: 'close reject abandon discard decline won\'t merge', keys: ['⇧w'], run: openCloseDialog, isEnabled: () => closeTargets().length > 0 },

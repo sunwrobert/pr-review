@@ -926,6 +926,7 @@ kbd[data-glyph='backspace'] { --kbd-glyph: url("data:image/svg+xml,%3Csvg%20xmln
 .thread-list { display: flex; flex-direction: column; gap: 10px; }
 .thread { border: 1px solid var(--border-soft); border-left: 3px solid var(--wait); border-radius: 10px; background: var(--bg-elev); overflow: hidden; }
 .thread.is-resolved { border-left-color: var(--ok); opacity: .7; }
+.thread.is-active { border-color: var(--accent); border-left-color: var(--accent); }
 .thread-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; border-bottom: 1px solid var(--border-soft); }
 .thread-loc { display: inline-flex; align-items: center; gap: 6px; min-width: 0; padding: 2px 6px; border: 0; border-radius: 5px; background: none; color: var(--text-2); }
 .thread-loc:hover { background: var(--bg-hover); color: var(--text); }
@@ -996,3 +997,12 @@ kbd[data-glyph='backspace'] { --kbd-glyph: url("data:image/svg+xml,%3Csvg%20xmln
 .review-loading .sk-line { height: 9px; }
 .review-loading-note { font-size: 11px; }
 @media (prefers-reduced-motion: reduce) { .review-bar-meta .spinner { animation: none; } }
+
+/* Stacked PRs: a rail down the left edge joins the stack, bottom (merges first) on top. */
+#pr-list li.in-stack { position: relative; }
+#pr-list li.in-stack::before { content: ''; position: absolute; left: 3px; top: 50%; bottom: 50%; width: 2px; background: var(--accent); border-radius: 2px; pointer-events: none; }
+#pr-list li.in-stack.stack-up::before { top: -1px; }
+#pr-list li.in-stack.stack-down::before { bottom: -1px; }
+#pr-list li.in-stack::after { content: ''; position: absolute; left: 1px; top: calc(50% - 3px); width: 6px; height: 6px; border-radius: 50%; background: var(--accent); pointer-events: none; }
+.stack-pill { display: inline-flex; align-items: center; gap: 3px; margin-right: 6px; padding: 0 5px; height: 16px; border-radius: 4px; font-size: 10.5px; font-weight: 700; font-variant-numeric: tabular-nums; vertical-align: 1px; color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.stack-pill .ico { width: 11px; height: 11px; stroke-width: 2.25; }

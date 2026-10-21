@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import fc from 'fast-check';
 import type { PullRequest } from './github';
-import { applyPastedOrder, parsePastedOrder } from './pasted-order';
+import { applyPastedOrder, parsePastedOrder, parsePullReference } from './pasted-order';
 
 const SAMPLE = `Merge Now (33)
 All approved, clean, required checks green, no open threads.
@@ -65,5 +65,24 @@ describe('repo-qualified references', () => {
 
   test('still ignores anchors and fragments that are not PR references', () => {
     expect(parsePastedOrder('docs/page.md#section-2\nhttps://x.dev/#12\n#300 real\n#301 real').numbers).toEqual([300, 301]);
+  });
+});
+
+describe('parsePullReference', () => {
+  test('reads owner and repo from a pull URL', () => {
+    expect(parsePullReference('https://github.com/OpenRouterTeam/openrouter-web/pull/53207', undefined)).toEqual({ repo: 'OpenRouterTeam/openrouter-web', number: 53207 });
+  });
+
+  test('a bare #123 uses the fallback repo', () => {
+    expect(parsePullReference('#42', 'o/r')).toEqual({ repo: 'o/r', number: 42 });
+    expect(parsePullReference('#42', undefined)).toBeNull();
+  });
+
+  test('owner/repo#123 names its own repo', () => {
+    expect(parsePullReference('see o/other#7', 'o/r')).toEqual({ repo: 'o/other', number: 7 });
+  });
+
+  test('text without a PR is null', () => {
+    expect(parsePullReference('hello world', 'o/r')).toBeNull();
   });
 });

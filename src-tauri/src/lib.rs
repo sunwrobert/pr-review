@@ -171,6 +171,30 @@ async fn merge_states(ids: Vec<String>) -> Result<String, String> {
     gh(&["api", "graphql", "-f", &format!("query={query}")]).await
 }
 
+fn is_safe_branch(branch: &str) -> bool {
+    !branch.is_empty() && branch.len() <= 255 && !branch.chars().any(|character| character.is_control())
+}
+
+#[tauri::command]
+async fn pull(repo: String, number: u64) -> Result<String, String> {
+    validate_repo(&repo)?;
+    let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
+    let query = format!("query($owner: String!, $name: String!, $number: Int!) {{ repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ state {QUEUE_FIELDS} stack {{ baseRefName entries(first: 100) {{ nodes {{ position pullRequest {{ state {QUEUE_FIELDS} }} }} }} }} }} }} }}");
+    gh(&["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("owner={owner}"), "-f", &format!("name={name}"), "-F", &format!("number={number}")]).await
+}
+
+/// Open pulls stacked directly on `head` (above) and the open pull whose head is `base` (below).
+#[tauri::command]
+async fn stack_neighbors(repo: String, head: String, base: String) -> Result<String, String> {
+    validate_repo(&repo)?;
+    if !is_safe_branch(&head) || !is_safe_branch(&base) {
+        return Err("invalid branch".to_string());
+    }
+    let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
+    let query = format!("query($owner: String!, $name: String!, $head: String!, $base: String!) {{ repository(owner: $owner, name: $name) {{ above: pullRequests(baseRefName: $head, states: OPEN, first: 20) {{ nodes {{ {QUEUE_FIELDS} }} }} below: pullRequests(headRefName: $base, states: OPEN, first: 5) {{ nodes {{ {QUEUE_FIELDS} }} }} }} }}");
+    gh(&["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("owner={owner}"), "-f", &format!("name={name}"), "-f", &format!("head={head}"), "-f", &format!("base={base}")]).await
+}
+
 #[tauri::command]
 async fn threads(repo: String, number: u64) -> Result<String, String> {
     validate_repo(&repo)?;
@@ -593,7 +617,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, viewer, comment, message_devin, threads, set_thread_resolved, reply_to_thread, merge_queue, merge_states, conversation, body, diff, approve, merge, close, open_in_browser, review_context, readiness_available, readiness, group_files])
+        .invoke_handler(tauri::generate_handler![queue, pull, stack_neighbors, viewer, comment, message_devin, threads, set_thread_resolved, reply_to_thread, merge_queue, merge_states, conversation, body, diff, approve, merge, close, open_in_browser, review_context, readiness_available, readiness, group_files])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }

@@ -53,3 +53,15 @@ export function applyPastedOrder(pulls: readonly PullRequest[], order: PastedOrd
   const rest = pulls.filter((pull) => !rank.has(pull.number));
   return [...listed, ...rest];
 }
+
+const PULL_URL = /github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d{1,7})\b/;
+const SHORT_REFERENCE = /(?:^|[^\w./#-])(?:([\w.-]+\/[\w.-]+))?#(\d{1,7})\b/;
+
+/** The one PR a paste names: a `/pull/` URL, `owner/repo#123`, or `#123` in `fallbackRepo`. */
+export function parsePullReference(text: string, fallbackRepo: string | undefined): { repo: string; number: number } | null {
+  const url = PULL_URL.exec(text);
+  if (url != null) return { repo: url[1]!, number: Number(url[2]) };
+  const short = SHORT_REFERENCE.exec(text);
+  const repo = short?.[1] ?? fallbackRepo;
+  return short == null || repo == null ? null : { repo, number: Number(short[2]) };
+}

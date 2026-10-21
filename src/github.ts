@@ -122,6 +122,43 @@ export async function fetchQueue(kind: QueueKind): Promise<PullRequest[]> {
     .map(toPullRequest);
 }
 
+type RawStatePull = RawPullRequest & { state: string };
+
+interface PullResponse {
+  data?: { repository: { pullRequest: (RawStatePull & { stack: { baseRefName: string; entries: { nodes: { position: number; pullRequest: RawStatePull }[] } } | null }) | null } | null };
+  errors?: { message: string }[];
+}
+
+/** GitHub's native stack: the branch it merges into and its open pulls, bottom first. */
+export interface NativeStack {
+  baseRefName: string;
+  pulls: PullRequest[];
+}
+
+interface NeighborsResponse {
+  data?: { repository: { above: { nodes: RawPullRequest[] }; below: { nodes: RawPullRequest[] } } | null };
+  errors?: { message: string }[];
+}
+
+/** One pull by number, open or not, with its native GitHub stack when it has one. */
+export async function fetchPull(repo: string, number: number): Promise<{ pull: PullRequest; isOpen: boolean; stack: NativeStack | null }> {
+  const response: PullResponse = JSON.parse(await invoke<string>('pull', { repo, number }));
+  const raw = response.data?.repository?.pullRequest;
+  if (raw == null) throw new Error(response.errors?.map((error) => error.message).join('; ') ?? `${repo}#${number} not found`);
+  const { state, stack, ...rest } = raw;
+  const entries = [...(stack?.entries.nodes ?? [])].sort((left, right) => left.position - right.position);
+  const pulls = entries.filter((entry) => entry.pullRequest.state === 'OPEN').map(({ pullRequest: { state: _state, ...open } }) => toPullRequest(open));
+  return { pull: toPullRequest(rest), isOpen: state === 'OPEN', stack: stack == null ? null : { baseRefName: stack.baseRefName, pulls } };
+}
+
+/** Open pulls stacked on `pull` and the open pull it is stacked on. */
+export async function fetchStackNeighbors(pull: PullRequest): Promise<PullRequest[]> {
+  const response: NeighborsResponse = JSON.parse(await invoke<string>('stack_neighbors', { repo: pull.repository.nameWithOwner, head: pull.headRefName, base: pull.baseRefName }));
+  const repository = response.data?.repository;
+  if (repository == null) throw new Error(response.errors?.map((error) => error.message).join('; ') ?? 'Empty response');
+  return [...repository.below.nodes, ...repository.above.nodes].map(toPullRequest);
+}
+
 export function fetchBody(pull: PullRequest): Promise<string> {
   return invoke<string>('body', { repo: pull.repository.nameWithOwner, number: pull.number });
 }
@@ -159,19 +196,19 @@ interface MergeQueueResponse {
 
 const mergeQueueCache = new Map<string, Promise<boolean>>();
 
-export function usesMergeQueue(pull: PullRequest): Promise<boolean> {
-  const key = `${pull.repository.nameWithOwner}#${pull.baseRefName}`;
+/** Whether `base` (the PR's own base, or its stack's base for a stacked PR) merges through a queue. */
+export function usesMergeQueue(pull: PullRequest, base = pull.baseRefName): Promise<boolean> {
+  const key = `${pull.repository.nameWithOwner}#${base}`;
   const cached = mergeQueueCache.get(key);
   if (cached != null) return cached;
-  const pending = invoke<string>('merge_queue', { repo: pull.repository.nameWithOwner, base: pull.baseRefName })
+  const pending = invoke<string>('merge_queue', { repo: pull.repository.nameWithOwner, base })
     .then((raw) => (JSON.parse(raw) as MergeQueueResponse).data?.repository?.mergeQueue != null)
     .catch(() => false);
   mergeQueueCache.set(key, pending);
   return pending;
 }
 
-export async function mergePull(pull: PullRequest, method: MergeMethod): Promise<string> {
-  const queued = await usesMergeQueue(pull);
+export function mergePull(pull: PullRequest, method: MergeMethod, queued: boolean): Promise<string> {
   return invoke<string>('merge', { repo: pull.repository.nameWithOwner, number: pull.number, method, queued, nodeId: pull.id });
 }
 

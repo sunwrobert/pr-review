@@ -14,6 +14,17 @@ function mixedFiles(number: number): string {
 const WITH_IMAGES = new URLSearchParams(location.search).has('images');
 const IMAGE_HTML = (seed: number): string => `<p><img src="https://camo.githubusercontent.com/test-${seed}" alt="shot ${seed}" width="600" height="300" /></p>`;
 const pulls = (IS_DEMO ? DEMO_PULLS : generatePulls(COUNT)).map((pull) => (WITH_IMAGES ? { ...pull, author: { ...pull.author, avatarUrl: `https://avatars.githubusercontent.com/u/${pull.number % 7}?v=4` } } : pull));
+const outside: (typeof pulls)[number][] = [];
+/** `?stacks` chains a few same-repo pulls (spread out in the list) into a 3-PR and a 2-PR stack. */
+if (new URLSearchParams(location.search).has('stacks')) {
+  const repo = pulls[0]!.repository.nameWithOwner;
+  const same = pulls.filter((pull) => pull.repository.nameWithOwner === repo);
+  const chain = (members: (typeof pulls)[number][]): void => members.forEach((pull, index) => index > 0 && (pull.baseRefName = members[index - 1]!.headRefName));
+  chain([same[6], same[1], same[3]].filter((pull) => pull != null));
+  chain([same[2], same[8]].filter((pull) => pull != null));
+  const top = same[3];
+  if (top != null) outside.push({ ...top, id: 'DEMO_OUTSIDE', number: 9001, title: 'feat(stack): top PR that is not in this view', headRefName: 'stack-outside', baseRefName: top.headRefName });
+}
 const byId = new Map(pulls.map((pull) => [pull.id, pull]));
 const byNumber = new Map(pulls.map((pull) => [pull.number, pull]));
 const calls: Record<string, number> = {};
@@ -74,6 +85,8 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
     return JSON.stringify({ data: {} });
   },
   reply_to_thread: () => JSON.stringify({ data: {} }),
+  pull: (args) => { const pull = [...pulls, ...outside].find((candidate) => candidate.number === args.number); return JSON.stringify({ data: { repository: { pullRequest: pull == null ? null : { ...pull, state: 'OPEN' } } } }); },
+  stack_neighbors: (args) => { const all = [...pulls, ...outside].filter((pull) => pull.repository.nameWithOwner === args.repo); return JSON.stringify({ data: { repository: { above: { nodes: all.filter((pull) => pull.baseRefName === args.head) }, below: { nodes: all.filter((pull) => pull.headRefName === args.base) } } } }); },
   merge_queue: () => JSON.stringify({ data: { repository: { mergeQueue: null } } }),
   readiness_available: () => AI_GROUPING_MS != null,
   /** `?aiGroupingMs=N` turns the AI paths on and answers grouping after N ms with one group per top-level folder. */
