@@ -819,11 +819,11 @@ function threadHtml(thread: ReviewThread): string {
     ${rest.map((comment) => commentHtml(comment, true)).join('')}
     ${thread.totalComments > thread.comments.length ? `<div class="thread-more muted">${thread.totalComments - thread.comments.length} more on GitHub</div>` : ''}
     <form class="thread-reply" data-thread-form="${escapeHtml(thread.id)}" hidden>
-      <textarea rows="3" placeholder="Reply… (⌘↵ to send${thread.canResolve && !thread.isResolved ? ', ⌘⇧↵ to send and resolve' : ''})"></textarea>
+      <textarea rows="3" placeholder="Reply… (↵ to send${thread.canResolve && !thread.isResolved ? ', ⌘↵ to send and resolve' : ''}, ⇧↵ for a new line)"></textarea>
       <div class="thread-reply-actions">
         <button type="button" class="ghost" data-thread-cancel>Cancel <kbd>esc</kbd></button>
-        ${thread.canResolve && !thread.isResolved ? '<button type="button" class="ghost" data-thread-send-resolve>Reply &amp; resolve</button>' : ''}
-        <button type="button" class="primary" data-thread-send>Reply <kbd>⌘</kbd><kbd>↵</kbd></button>
+        ${thread.canResolve && !thread.isResolved ? '<button type="button" class="ghost" data-thread-send-resolve>Reply &amp; resolve <kbd>⌘</kbd><kbd>↵</kbd></button>' : ''}
+        <button type="button" class="primary" data-thread-send>Reply <kbd>↵</kbd></button>
       </div>
     </form>
   </article>`;
@@ -975,10 +975,10 @@ dom.descPane.addEventListener('keydown', (event) => {
     form.hidden = true;
     return;
   }
-  if (event.key === 'Enter' && event.metaKey) {
+  if (isSubmitKey(event)) {
     event.preventDefault();
     event.stopPropagation();
-    void sendThreadReply(form.dataset.threadForm ?? '', form, event.shiftKey);
+    void sendThreadReply(form.dataset.threadForm ?? '', form, event.metaKey || event.ctrlKey);
   }
 });
 
@@ -2579,12 +2579,12 @@ dom.triage.addEventListener('keydown', (event) => {
     dom.triageCopy.focus();
     return;
   }
-  if (isInMessage && event.key === 'Enter' && !(event.metaKey || event.ctrlKey)) return;
+  if (isInMessage && event.key === 'Enter' && !isSubmitKey(event)) return;
   if (!isInMessage && !event.metaKey && !event.ctrlKey && !event.altKey && handleTriageKey(event)) {
     event.preventDefault();
     return;
   }
-  if (event.key !== 'Enter' || !(event.metaKey || event.ctrlKey) || dom.triageDevin.disabled) return;
+  if (!(isInMessage ? isSubmitKey(event) : event.key === 'Enter' && (event.metaKey || event.ctrlKey)) || dom.triageDevin.disabled) return;
   event.preventDefault();
   event.stopPropagation();
   dom.triage.close('devin');
@@ -2931,7 +2931,7 @@ function deliverToDevin(pull: PullRequest, sessionId: string, body: string, onSe
 
 dom.commentBody.addEventListener('input', () => (dom.commentSend.disabled = dom.commentBody.value.trim() === ''));
 dom.commentBody.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+  if (isSubmitKey(event)) {
     event.preventDefault();
     event.stopPropagation();
     void submitComment();
@@ -3298,4 +3298,9 @@ if (import.meta.env.VITE_PR_REVIEW_HARNESS === '1') {
       }),
     },
   });
+}
+
+/** Enter submits a dialog's text box; ⇧↵ (and IME composition) stays a new line. */
+function isSubmitKey(event: KeyboardEvent): boolean {
+  return event.key === 'Enter' && !event.shiftKey && !event.isComposing;
 }
