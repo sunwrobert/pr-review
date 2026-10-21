@@ -103,7 +103,7 @@ export class GroupedReview {
   private readonly elements: Elements;
   private readonly hooks: GroupedReviewHooks;
   private isGrouped = localStorage.getItem(GROUPED_KEY) === '1';
-  private isHidingTests = localStorage.getItem(HIDE_TESTS_KEY) === '1';
+  private isHidingTests = localStorage.getItem(HIDE_TESTS_KEY) !== '0';
   private files: ParsedFile[] = [];
   private fingerprint = '';
   private aiState: 'idle' | 'loading' | 'failed' = 'idle';
