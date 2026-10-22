@@ -129,6 +129,7 @@ let viewer: string | null = null;
 const diffCache = new Map<string, Promise<ParsedFile[]>>();
 const queueCache = new Map<QueueKind, PullRequest[]>();
 let isSelectedQueued = false;
+let isSelectedQueueKnown = false;
 const diffView = new DiffView(dom.diffRoot, state.diffStyle, { onToggle: (id, isCollapsed) => markFileCollapsed(id, isCollapsed) });
 /** Files the diff pane shows right now (after Grouped / Hide tests); `allFiles` is the whole PR. */
 let currentFiles: ParsedFile[] = [];
@@ -143,8 +144,9 @@ const MERGE_METHOD: MergeMethod = 'squash';
 syncMergeLabel();
 
 
-function syncMergeLabel(): void {
+function syncMergeLabel(pull?: PullRequest): void {
   const selectedCount = state.checkedIds.size;
+  if (selectedCount === 0 && pull != null && stackMergeCount(pull) > 1) return syncStackMergeLabel(pull);
   const baseLabel = isSelectedQueued ? 'Merge when ready' : MERGE_LABELS[MERGE_METHOD];
   const label = selectedCount > 0 ? `${isSelectedQueued ? 'Queue' : 'Merge'} ${selectedCount} selected` : baseLabel;
   dom.merge.innerHTML = `${MERGE_ICON}${selectedCount > 0 ? `<span class="merge-count">${selectedCount}</span>` : ''}<kbd>⌘</kbd><kbd>↵</kbd>`;
@@ -1218,11 +1220,13 @@ function renderDetailMeta(pull: PullRequest): void {
 
 function syncQueueState(pull: PullRequest): void {
   isSelectedQueued = false;
-  syncMergeLabel();
+  isSelectedQueueKnown = false;
+  syncMergeLabel(pull);
   void usesMergeQueue(pull, queueBase(pull)).then((isQueued) => {
     if (selectedPull()?.id !== pull.id) return;
     isSelectedQueued = isQueued;
-    syncMergeLabel();
+    isSelectedQueueKnown = true;
+    syncMergeLabel(pull);
   });
 }
 
@@ -2013,7 +2017,7 @@ function checkedPulls(): PullRequest[] {
 function renderBulkBar(): void {
   const checked = checkedPulls();
   const hasSelection = checked.length > 0;
-  syncMergeLabel();
+  syncMergeLabel(selectedPull());
   setVisibleWithMotion(dom.bulkBar, hasSelection);
   dom.list.classList.toggle('selecting', hasSelection);
   if (!hasSelection) return;
@@ -2251,6 +2255,26 @@ function queueBase(pull: PullRequest): string {
   return nativeStackBase.get(pull.id) ?? (slot == null ? undefined : pullById(slot.stackId)?.baseRefName) ?? pull.baseRefName;
 }
 
+/** How many PRs one merge of `pull` lands: itself plus everything stacked below it. */
+function stackMergeCount(pull: PullRequest): number {
+  return (stackSlots.get(pull.id)?.index ?? 0) + 1;
+}
+
+/** A PR based on another PR's branch: merging it directly would land it in that branch, so it may only go through the stack base's queue. */
+function isOnParentBranch(pull: PullRequest): boolean {
+  return pull.baseRefName !== queueBase(pull);
+}
+
+function syncStackMergeLabel(pull: PullRequest): void {
+  const below = stackMergeCount(pull) - 1;
+  const base = queueBase(pull);
+  const isBlocked = isSelectedQueueKnown && !isSelectedQueued && isOnParentBranch(pull);
+  dom.merge.innerHTML = `${MERGE_ICON}<span class="merge-count">×${below + 1}</span><kbd>⌘</kbd><kbd>↵</kbd>`;
+  dom.merge.title = isBlocked
+    ? `#${pull.number} is stacked on ${pull.baseRefName} and ${base} has no merge queue — merge the bottom of the stack first`
+    : `${isSelectedQueued ? 'Queue' : 'Merge'} #${pull.number} and the ${below} stacked below it into ${base}  ⌘↵`;
+}
+
 function topOfEachStack(pulls: PullRequest[]): PullRequest[] {
   const top = new Map<string, PullRequest>();
   pulls.forEach((pull) => {
@@ -2265,9 +2289,14 @@ function topOfEachStack(pulls: PullRequest[]): PullRequest[] {
 }
 
 async function bulkMerge(): Promise<void> {
-  const pulls = topOfEachStack(checkedPulls().filter((pull) => !pull.isDraft && pull.mergeable !== 'CONFLICTING' && !leaving.has(pull.id)));
+  const candidates = topOfEachStack(checkedPulls().filter((pull) => !pull.isDraft && pull.mergeable !== 'CONFLICTING' && !leaving.has(pull.id)));
+  if (candidates.length === 0) return;
+  const allFlags = await Promise.all(candidates.map((pull) => usesMergeQueue(pull, queueBase(pull))));
+  const blocked = candidates.filter((pull, index) => !allFlags[index] && isOnParentBranch(pull));
+  if (blocked.length > 0) toast(`Skipped ${blocked.map((pull) => `#${pull.number}`).join(', ')}: stacked on another PR's branch with no merge queue on the stack base`, true);
+  const pulls = candidates.filter((pull) => !blocked.includes(pull));
   if (pulls.length === 0) return;
-  const queueFlags = await Promise.all(pulls.map((pull) => usesMergeQueue(pull, queueBase(pull))));
+  const queueFlags = pulls.map((pull) => allFlags[candidates.indexOf(pull)] ?? false);
   const isAllQueued = queueFlags.every(Boolean);
   if (!isAllQueued && !(await confirmBulkMerge(pulls, MERGE_METHOD))) return;
   const verb = isAllQueued ? 'Queued' : 'Merged';
@@ -2340,6 +2369,10 @@ async function mergeSelected(): Promise<void> {
   const pull = selectedPull();
   if (pull == null || dom.merge.disabled || leaving.has(pull.id)) return;
   const isQueued = await usesMergeQueue(pull, queueBase(pull));
+  if (!isQueued && isOnParentBranch(pull)) {
+    toast(`#${pull.number} is stacked on ${pull.baseRefName}: ${queueBase(pull)} has no merge queue, so merge the bottom of the stack first`, true);
+    return;
+  }
   if (!isQueued && !(await confirmMerge(pull, MERGE_METHOD))) return;
   const failure = await runMerge(pull, isQueued);
   const below = stackSlots.get(pull.id)?.index ?? 0;

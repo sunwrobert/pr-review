@@ -87,7 +87,8 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   reply_to_thread: () => JSON.stringify({ data: {} }),
   pull: (args) => { const pull = [...pulls, ...outside].find((candidate) => candidate.number === args.number); return JSON.stringify({ data: { repository: { pullRequest: pull == null ? null : { ...pull, state: 'OPEN' } } } }); },
   stack_neighbors: (args) => { const all = [...pulls, ...outside].filter((pull) => pull.repository.nameWithOwner === args.repo); return JSON.stringify({ data: { repository: { above: { nodes: all.filter((pull) => pull.baseRefName === args.head) }, below: { nodes: all.filter((pull) => pull.headRefName === args.base) } } } }); },
-  merge_queue: () => JSON.stringify({ data: { repository: { mergeQueue: null } } }),
+  /** `?queue` gives every branch a merge queue. */
+  merge_queue: () => JSON.stringify({ data: { repository: { mergeQueue: new URLSearchParams(location.search).has('queue') ? { url: '' } : null } } }),
   readiness_available: () => AI_GROUPING_MS != null,
   /** `?aiGroupingMs=N` turns the AI paths on and answers grouping after N ms with one group per top-level folder. */
   group_files: async (args) => {
