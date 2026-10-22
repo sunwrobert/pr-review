@@ -25,6 +25,8 @@ export interface PullRequest {
   repository: { nameWithOwner: string };
   checkState: CheckState | null;
   queueEntry: { position: number; state: string } | null;
+  /** GitHub's native stack: the branch it merges into and how many open pulls one merge of this pull lands (itself and those below). */
+  stack: { baseRefName: string; mergeCount: number } | null;
   openThreads?: number;
   /** Names of required checks that failed; undefined until merge states load. */
   failingRequired?: string[];
@@ -71,8 +73,15 @@ function toMergeState({ reviewThreads, commits, ...rest }: RawMergeState): Merge
   };
 }
 
-interface RawPullRequest extends Omit<PullRequest, 'checkState' | 'mergeable' | 'mergeStateStatus' | 'queueEntry'> {
+interface RawStack {
+  baseRefName: string;
+  entries: { nodes: { position: number; pullRequest: { state: string } }[] };
+}
+
+interface RawPullRequest extends Omit<PullRequest, 'checkState' | 'mergeable' | 'mergeStateStatus' | 'queueEntry' | 'stack'> {
   mergeQueueEntry: { position: number; state: string } | null;
+  stackEntry?: { position: number } | null;
+  stack?: RawStack | null;
   commits: { nodes: { commit: { statusCheckRollup: { state: CheckState } | null } }[] };
 }
 
@@ -85,8 +94,14 @@ function isPullRequest(node: RawPullRequest | Record<string, never>): node is Ra
   return typeof node.number === 'number';
 }
 
-function toPullRequest({ commits, mergeQueueEntry, ...pull }: RawPullRequest): PullRequest {
-  return { ...pull, queueEntry: mergeQueueEntry ?? null, mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: commits.nodes[0]?.commit.statusCheckRollup?.state ?? null };
+function toStack(stack: RawStack | null | undefined, position: number | undefined): PullRequest['stack'] {
+  if (stack == null || position == null) return null;
+  const mergeCount = stack.entries.nodes.filter((entry) => entry.position <= position && entry.pullRequest.state === 'OPEN').length;
+  return { baseRefName: stack.baseRefName, mergeCount };
+}
+
+function toPullRequest({ commits, mergeQueueEntry, stackEntry, stack, ...pull }: RawPullRequest): PullRequest {
+  return { ...pull, queueEntry: mergeQueueEntry ?? null, stack: toStack(stack, stackEntry?.position), mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: commits.nodes[0]?.commit.statusCheckRollup?.state ?? null };
 }
 
 const MERGE_STATE_BATCH = 20;
@@ -125,7 +140,7 @@ export async function fetchQueue(kind: QueueKind): Promise<PullRequest[]> {
 type RawStatePull = RawPullRequest & { state: string };
 
 interface PullResponse {
-  data?: { repository: { pullRequest: (RawStatePull & { stack: { baseRefName: string; entries: { nodes: { position: number; pullRequest: RawStatePull }[] } } | null }) | null } | null };
+  data?: { repository: { pullRequest: (Omit<RawStatePull, 'stack'> & { stack: { baseRefName: string; entries: { nodes: { position: number; pullRequest: RawStatePull }[] } } | null }) | null } | null };
   errors?: { message: string }[];
 }
 
@@ -145,7 +160,8 @@ export async function fetchPull(repo: string, number: number): Promise<{ pull: P
   const response: PullResponse = JSON.parse(await invoke<string>('pull', { repo, number }));
   const raw = response.data?.repository?.pullRequest;
   if (raw == null) throw new Error(response.errors?.map((error) => error.message).join('; ') ?? `${repo}#${number} not found`);
-  const { state, stack, ...rest } = raw;
+  const { state, ...rest } = raw;
+  const { stack } = raw;
   const entries = [...(stack?.entries.nodes ?? [])].sort((left, right) => left.position - right.position);
   const pulls = entries.filter((entry) => entry.pullRequest.state === 'OPEN').map(({ pullRequest: { state: _state, ...open } }) => toPullRequest(open));
   return { pull: toPullRequest(rest), isOpen: state === 'OPEN', stack: stack == null ? null : { baseRefName: stack.baseRefName, pulls } };
@@ -209,7 +225,7 @@ export function usesMergeQueue(pull: PullRequest, base = pull.baseRefName): Prom
 }
 
 export function mergePull(pull: PullRequest, method: MergeMethod, queued: boolean): Promise<string> {
-  return invoke<string>('merge', { repo: pull.repository.nameWithOwner, number: pull.number, method, queued, nodeId: pull.id });
+  return invoke<string>('merge', { repo: pull.repository.nameWithOwner, number: pull.number, method, queued });
 }
 
 export function openInBrowser(url: string): Promise<void> {

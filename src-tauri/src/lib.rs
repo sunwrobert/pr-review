@@ -12,6 +12,8 @@ const QUEUE_FIELDS: &str = r#"
   author { login avatarUrl }
   repository { nameWithOwner }
   commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+  stackEntry { position }
+  stack { baseRefName entries(first: 100) { nodes { position pullRequest { state } } } }
 }"#;
 
 const MAX_MERGE_STATE_IDS: usize = 25;
@@ -462,30 +464,28 @@ async fn merge_queue(repo: String, base: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn merge(repo: String, number: u64, method: MergeMethod, queued: bool, node_id: Option<String>) -> Result<String, String> {
+async fn merge(repo: String, number: u64, method: MergeMethod, queued: bool) -> Result<String, String> {
     validate_repo(&repo)?;
-    let number = number.to_string();
-    if queued {
-        let id = node_id.filter(|id| is_node_id(id)).ok_or("missing pull request id")?;
-        let mutation = "mutation($id: ID!) { enqueuePullRequest(input: { pullRequestId: $id }) { mergeQueueEntry { position state } } }";
-        let output = gh(&["api", "graphql", "-f", &format!("query={mutation}"), "-f", &format!("id={id}")]).await?;
-        let parsed: serde_json::Value = serde_json::from_str(&output).map_err(|error| error.to_string())?;
-        if let Some(message) = parsed["errors"][0]["message"].as_str() {
-            return Err(message.to_string());
-        }
-        let position = parsed["data"]["enqueuePullRequest"]["mergeQueueEntry"]["position"].as_i64();
-        return Ok(match position {
-            Some(position) => format!("#{number} queued at position {}", position + 1),
-            None => format!("#{number} added to the merge queue"),
-        });
-    }
-    let flag = match method {
-        MergeMethod::Squash => "--squash",
-        MergeMethod::Merge => "--merge",
-        MergeMethod::Rebase => "--rebase",
+    // The async endpoint is the only one GitHub accepts for stacked pulls; it lands every open pull below this one into the stack's base.
+    let path = format!("repos/{repo}/pulls/{number}/merge-async");
+    let method = match method {
+        MergeMethod::Squash => "merge_method=squash",
+        MergeMethod::Merge => "merge_method=merge",
+        MergeMethod::Rebase => "merge_method=rebase",
     };
-    let output = gh(&["pr", "merge", &number, "-R", &repo, flag]).await?;
-    Ok(if output.trim().is_empty() { "Merge requested".to_string() } else { output })
+    let mut args = vec!["api", "-X", "PUT", path.as_str(), "-f"];
+    if queued {
+        args.push("merge_action=merge_queue");
+    } else {
+        args.extend(["merge_action=default", "-f", method]);
+    }
+    let output = gh(&args).await?;
+    let parsed: serde_json::Value = serde_json::from_str(&output).map_err(|error| error.to_string())?;
+    match parsed["status"].as_str() {
+        Some("failed") => Err(parsed["details"]["message"].as_str().unwrap_or("Merge failed").to_string()),
+        Some(status) => Ok(status.to_string()),
+        None => Err("Unexpected merge response".to_string()),
+    }
 }
 
 fn resolve_openrouter_key() -> Option<String> {

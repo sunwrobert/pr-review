@@ -1971,7 +1971,6 @@ async function showPastedStack(repo: string, number: number): Promise<void> {
     }
     const members = stack != null ? stack.pulls : await collectStack(pull, fetchStackNeighbors);
     if (token !== pastedStackToken) return;
-    if (stack != null) members.forEach((member) => nativeStackBase.set(member.id, stack.baseRefName));
     const ordered = stack != null ? members : orderByStacks(members, findStacks(members));
     const heading = ordered.length > 1 ? `Stack of #${number}` : `#${number}`;
     pastedExtras = ordered;
@@ -2246,23 +2245,20 @@ async function recheckMergeState(pull: PullRequest): Promise<void> {
 }
 
 /** A stacked PR merges with everything below it, so per stack only the highest checked PR is sent. */
-/** GitHub's native stack base for pasted stacks. */
-const nativeStackBase = new Map<string, string>();
-
 /** The branch a merge lands on: a stacked PR merges into its stack's base (usually main), not the branch below it. */
 function queueBase(pull: PullRequest): string {
   const slot = stackSlots.get(pull.id);
-  return nativeStackBase.get(pull.id) ?? (slot == null ? undefined : pullById(slot.stackId)?.baseRefName) ?? pull.baseRefName;
+  return pull.stack?.baseRefName ?? (slot == null ? undefined : pullById(slot.stackId)?.baseRefName) ?? pull.baseRefName;
 }
 
 /** How many PRs one merge of `pull` lands: itself plus everything stacked below it. */
 function stackMergeCount(pull: PullRequest): number {
-  return (stackSlots.get(pull.id)?.index ?? 0) + 1;
+  return pull.stack?.mergeCount ?? (stackSlots.get(pull.id)?.index ?? 0) + 1;
 }
 
-/** A PR based on another PR's branch: merging it directly would land it in that branch, so it may only go through the stack base's queue. */
+/** A PR based on another PR's branch outside a GitHub stack: merging it directly would land it in that branch, so it may only go through the stack base's queue. */
 function isOnParentBranch(pull: PullRequest): boolean {
-  return pull.baseRefName !== queueBase(pull);
+  return pull.stack == null && pull.baseRefName !== queueBase(pull);
 }
 
 function syncStackMergeLabel(pull: PullRequest): void {
@@ -2375,7 +2371,7 @@ async function mergeSelected(): Promise<void> {
   }
   if (!isQueued && !(await confirmMerge(pull, MERGE_METHOD))) return;
   const failure = await runMerge(pull, isQueued);
-  const below = stackSlots.get(pull.id)?.index ?? 0;
+  const below = stackMergeCount(pull) - 1;
   const withBelow = below > 0 ? ` with the ${below} stacked below it` : '';
   if (failure != null) toast(`Merge #${pull.number} failed: ${failure.replace(/^#\d+: /, '')}`, true);
   else toast(isQueued ? `#${pull.number}${withBelow} added to the merge queue` : `Merged #${pull.number}${withBelow}`);

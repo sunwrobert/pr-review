@@ -28,6 +28,7 @@ export const pullArbitrary: fc.Arbitrary<PullRequest> = fc.record({
   updatedAt: new Date(NOW - updatedAgoHours * 3_600_000).toISOString(),
   headRefName: `branch-${rest.number}`,
   baseRefName: 'main',
+  stack: null,
   author: { login: 'author', avatarUrl: '' },
   repository: { nameWithOwner: repo },
 }));
