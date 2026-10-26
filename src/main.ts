@@ -3422,9 +3422,7 @@ const checkForUpdates = startAutoUpdate({
 let restartIntoUpdate: (() => void) | null = null;
 
 renderBootSkeletons();
-void refresh(state.kind, true).then(() => {
-  (['mine', 'review', 'involved'] satisfies QueueKind[]).filter((kind) => kind !== state.kind).forEach((kind) => void refresh(kind, true));
-});
+(['mine', 'review', 'involved'] satisfies QueueKind[]).forEach((kind) => void refresh(kind, true));
 
 if (import.meta.env.VITE_PR_REVIEW_HARNESS === '1') {
   Object.assign(window, {

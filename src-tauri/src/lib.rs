@@ -17,8 +17,8 @@ const QUEUE_FIELDS: &str = r#"
 }"#;
 
 const MAX_MERGE_STATE_IDS: usize = 25;
-/// GitHub's search resolver times out (HTTP 502) on 100-node pages with this field set for big queues; 50 stays well clear.
-const QUEUE_PAGE_SIZE: usize = 50;
+/// 100 is GitHub's max for search; it adds only ~1 s per page versus 50 and halves page count for large queues.
+const QUEUE_PAGE_SIZE: usize = 100;
 
 const MAX_DIFF_FALLBACK_FILES: usize = 3000;
 const GH_TIMEOUT_SECS: u64 = 45;
