@@ -84,6 +84,7 @@ const dom = {
   filterBar: element('filter-bar'),
   bulkBar: element('bulk-bar'),
   bulkCount: element('bulk-count'),
+  bulkFix: element<HTMLButtonElement>('bulk-fix'),
   bulkMerge: element<HTMLButtonElement>('bulk-merge'),
   bulkApprove: element<HTMLButtonElement>('bulk-approve'),
   bulkClose: element<HTMLButtonElement>('bulk-close'),
@@ -879,7 +880,7 @@ function syncThreadsButton(open: number | null): void {
   button.disabled = open == null || open === 0 && currentThreads.length === 0;
   badge.hidden = open == null || open === 0;
   badge.textContent = String(open ?? 0);
-  button.dataset.tip = open == null ? 'Loading review threads…' : open === 0 ? (currentThreads.length === 0 ? 'No review threads on this PR' : 'All review threads resolved  ⇧C') : `${open} open review thread${open === 1 ? '' : 's'}  ⇧C`;
+  button.dataset.tip = open == null ? 'Loading review threads…' : open === 0 ? (currentThreads.length === 0 ? 'No review threads on this PR' : 'All review threads resolved') : `Resolve ${open} open review thread${open === 1 ? '' : 's'}  ⇧C`;
 }
 
 function renderThreads(section: HTMLElement, threads: ReviewThread[]): void {
@@ -978,32 +979,33 @@ async function resolveAllOpenThreads(): Promise<void> {
     toast(`No open review threads on #${pull.number}`);
     return;
   }
-  const open = currentThreads.filter((thread) => !thread.isResolved && thread.canResolve);
+  const threads = currentThreads.length > 0 ? currentThreads : await loadThreads(pull).catch((): ReviewThread[] => []);
+  const open = threads.filter((thread) => !thread.isResolved && thread.canResolve);
   if (open.length === 0) {
-    toast(pull.openThreads != null ? `Open threads cannot be resolved by you on #${pull.number}` : `No review threads on #${pull.number}`);
+    toast(threads.some((thread) => !thread.isResolved) ? `Open threads cannot be resolved by you on #${pull.number}` : `No open review threads on #${pull.number}`);
     return;
   }
-  for (const thread of open) {
-    try {
+  const resolvedIds = new Set<string>();
+  const results = await Promise.allSettled(
+    open.map(async (thread) => {
       await setThreadResolved(thread.id, true);
-    } catch (error_) {
-      console.warn('resolve thread failed', errorMessage(error_));
-    }
-  }
+      resolvedIds.add(thread.id);
+    }),
+  );
+  const failed = results.filter((result) => result.status === 'rejected').length;
+  forgetThreads(pull);
+  const updated = threads.map((thread) => (resolvedIds.has(thread.id) ? { ...thread, isResolved: true } : thread));
   const section = dom.descPane.querySelector<HTMLElement>('[data-threads]');
-  if (section != null) {
-    const updated = currentThreads.map((thread) => thread.canResolve ? { ...thread, isResolved: true } : thread);
-    renderThreads(section, updated);
-    const remaining = updated.filter((thread) => !thread.isResolved).length;
-    pull.openThreads = remaining;
-    invalidateList();
-  }
+  if (section != null && selectedPull()?.id === pull.id) renderThreads(section, updated);
+  pull.openThreads = updated.filter((thread) => !thread.isResolved).length;
+  invalidateList();
   renderList();
-  toast(`Resolved ${open.length} thread${open.length === 1 ? '' : 's'} on #${pull.number}`);
-}
-
-function scrollDescriptionTo(element: HTMLElement): void {
-  glideScrollTo(dom.descPane, dom.descPane.scrollTop + element.getBoundingClientRect().top - dom.descPane.getBoundingClientRect().top - 12);
+  toast(
+    failed === 0
+      ? `Resolved ${resolvedIds.size} thread${resolvedIds.size === 1 ? '' : 's'} on #${pull.number}`
+      : `Resolved ${resolvedIds.size}, failed ${failed} on #${pull.number}`,
+    failed > 0,
+  );
 }
 
 dom.descPane.addEventListener('click', (event) => {
@@ -2035,6 +2037,7 @@ function renderBulkBar(): void {
   const readyCount = checked.filter(isReady).length;
   dom.bulkCount.innerHTML = `<b>${checked.length}</b> selected${readyCount < checked.length ? ` · <span class="warn">${checked.length - readyCount} not ready</span>` : ''}`;
   dom.bulkMerge.disabled = checked.every((pull) => pull.isDraft || pull.mergeable === 'CONFLICTING');
+  dom.bulkFix.disabled = checked.every((pull) => leaving.has(pull.id) || fixingWithDevin.has(pull.id));
   dom.bulkApprove.disabled = checked.every(isOwnPull);
   dom.bulkClose.disabled = checked.every((pull) => leaving.has(pull.id));
   dom.bulkApprove.title = dom.bulkApprove.disabled ? 'You can’t approve your own pull requests' : 'Approve selected  ⇧A';
@@ -2090,7 +2093,7 @@ function toggleVisualMode(): void {
   visualAnchorId = state.selectedId;
   dom.list.classList.add('visual');
   setChecked([state.selectedId], true);
-  toast('Visual mode: J/K to extend, ⌘↵ merge, ⇧A approve, Esc to exit');
+  toast('Visual mode: J/K to extend, ⌘↵ merge, ⇧A approve, ⇧F fix, Esc to exit');
 }
 
 function syncVisualRange(): void {
@@ -3024,6 +3027,10 @@ function setFixButtonBusy(pull: PullRequest, isBusy: boolean): void {
 }
 
 async function fixWithDevin(): Promise<void> {
+  if (state.checkedIds.size > 0) {
+    await bulkFixWithDevin();
+    return;
+  }
   const pull = selectedPull();
   const message = pull == null ? null : devinFixMessage(pull);
   if (pull == null || message == null || fixingWithDevin.has(pull.id)) return;
@@ -3035,6 +3042,19 @@ async function fixWithDevin(): Promise<void> {
     return;
   }
   deliverToDevin(pull, sessionId, message, () => setFixButtonBusy(pull, false));
+}
+
+async function bulkFixWithDevin(): Promise<void> {
+  const targets = checkedPulls().filter((pull) => !leaving.has(pull.id) && !fixingWithDevin.has(pull.id));
+  if (targets.length === 0) return;
+  targets.forEach((pull) => setFixButtonBusy(pull, true));
+  dom.bulkFix.disabled = true;
+  try {
+    await sendTriageToDevin(targets, (pull) => devinFixMessage(pull) ?? BULK_FIX_MESSAGE);
+  } finally {
+    targets.forEach((pull) => setFixButtonBusy(pull, false));
+    renderBulkBar();
+  }
 }
 
 const DEVIN_BULK_CONCURRENCY = 4;
@@ -3199,7 +3219,7 @@ const COMMANDS: Command[] = [
   { id: 'media', section: 'Navigate', title: 'Open first image / video / HTML preview', aliases: 'lightbox screenshot media picture gif recording', keys: ['i', '⌘⇧i'], run: () => openMedia(0), isEnabled: hasPull },
   { id: 'description', section: 'Navigate', title: 'Jump to description', keys: ['⌘↑'], run: () => diffView.scrollToTop(), isEnabled: hasPull },
   { id: 'devin', section: 'Pull request', title: 'Open Devin session', aliases: 'devin agent session link', keys: ['d'], run: () => void openDevinSession(), isEnabled: hasPull },
-  { id: 'fix-with-devin', section: 'Pull request', title: 'Fix CI / merge conflicts with Devin', aliases: 'conflict rebase devin resolve merge fix ci checks failing', keys: ['⇧f'], run: () => void fixWithDevin(), isEnabled: () => { const pull = selectedPull(); return pull != null && devinFixMessage(pull) != null; } },
+  { id: 'fix-with-devin', section: 'Pull request', title: 'Fix CI / merge conflicts with Devin (all selected when several are checked)', aliases: 'conflict rebase devin resolve merge fix ci checks failing bulk', keys: ['⇧f'], run: () => void fixWithDevin(), isEnabled: () => state.checkedIds.size > 0 || (selectedPull() != null && devinFixMessage(selectedPull()!) != null) },
   { id: 'message-devin', section: 'Pull request', title: 'Message Devin session', aliases: 'devin agent session send tell ask chat', keys: ['⇧d'], run: () => void openDevinMessageDialog(), isEnabled: hasPull },
 
   ...VIM_COMMANDS,
@@ -3384,6 +3404,7 @@ element('toggle-grouping').addEventListener('click', toggleGrouping);
 element('bulk-ready').addEventListener('click', selectReady);
 element('bulk-unready').addEventListener('click', selectUnready);
 element('bulk-clear').addEventListener('click', clearChecked);
+dom.bulkFix.addEventListener('click', () => void bulkFixWithDevin());
 dom.bulkApprove.addEventListener('click', () => void bulkApprove());
 dom.bulkMerge.addEventListener('click', () => void bulkMerge());
 dom.bulkClose.addEventListener('click', openCloseDialog);

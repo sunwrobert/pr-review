@@ -31,7 +31,7 @@
           <span class="chip-sep"></span>
           <button data-smart="all" class="chip active" title="Show all  ⌥0">All <span class="chip-count" data-smart-count="all"></span></button>
           <button data-smart="ready" class="chip" title="Ready: green, mergeable, no changes requested  ⌥1"><i class="dot ok"></i>Ready <span class="chip-count" data-smart-count="ready"></span></button>
-          <button data-smart="threads" class="chip chip-threads" title="PRs with unresolved review threads  ⌥6 · jump to them in a PR  ⇧C"><i data-icon="comment"></i>Threads <span class="chip-count" data-smart-count="threads"></span></button>
+          <button data-smart="threads" class="chip chip-threads" title="PRs with unresolved review threads  ⌥6 · resolve them in a PR  ⇧C"><i data-icon="comment"></i>Threads <span class="chip-count" data-smart-count="threads"></span></button>
           <button data-smart="attention" class="chip chip-attention" title="Show unready PRs  ⌥4 · select them all  ⇧U"><i class="dot bad"></i>Unready <span class="chip-count" data-smart-count="attention"></span></button>
           <span id="ai-status" class="ai-status off" title="Smart sort uses built-in rules">Rules</span>
           <select id="sort" class="sort" title="Sort order  ⇧S">
@@ -48,6 +48,7 @@
           <button id="bulk-ready" class="ghost" title="Select every Ready PR  ⇧R">Ready <kbd>⇧</kbd><kbd>R</kbd></button>
           <button id="bulk-unready" class="ghost" title="Select every PR that needs attention  ⇧U">Unready <kbd>⇧</kbd><kbd>U</kbd></button>
           <button id="bulk-clear" class="ghost" title="Clear selection  Esc or ⌫">Clear <kbd>⌫</kbd></button>
+          <button id="bulk-fix" class="ghost" title="Fix CI / merge conflicts with Devin  ⇧F">Fix <kbd>⇧</kbd><kbd>F</kbd></button>
           <button id="bulk-close" class="ghost" title="Close selected  ⇧W">Close <kbd>⇧</kbd><kbd>W</kbd></button>
           <button id="bulk-approve" class="ghost" title="Approve selected  ⇧A">Approve <kbd>⇧</kbd><kbd>A</kbd></button>
           <button id="bulk-merge" class="primary" title="Merge selected  ⌘↵">Merge <kbd>⌘</kbd><kbd>↵</kbd></button>
@@ -71,7 +72,7 @@
             <div class="actions">
               <button id="theme-button" class="ghost icon-action theme-button" title="Theme  T"><i data-icon="theme"></i><kbd class="icon-kbd">T</kbd></button>
               <div class="search"><i data-icon="search"></i><input id="filter" title="Filter pull requests  /" placeholder="Filter" spellcheck="false" autocomplete="off" /><kbd>/</kbd></div>
-              <button id="threads-button" class="ghost icon-action threads-button" title="Open review threads  ⇧C" disabled><i data-icon="threads"></i><span class="threads-badge" hidden></span><kbd class="icon-kbd">⇧</kbd><kbd class="icon-kbd">C</kbd></button>
+              <button id="threads-button" class="ghost icon-action threads-button" title="Resolve open review threads  ⇧C" disabled><i data-icon="threads"></i><span class="threads-badge" hidden></span><kbd class="icon-kbd">⇧</kbd><kbd class="icon-kbd">C</kbd></button>
               <button id="comment-button" class="ghost icon-action" title="Write a comment  C"><i data-icon="comment"></i><kbd class="icon-kbd">C</kbd></button>
               <button id="approve" class="ghost icon-action" title="Approve  A"><i data-icon="check"></i><kbd class="icon-kbd">A</kbd></button>
               <button id="close-pull" class="ghost icon-action" title="Close pull request  ⇧W"><i data-icon="circleX"></i><kbd class="icon-kbd">⇧</kbd><kbd class="icon-kbd">W</kbd></button>
