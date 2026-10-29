@@ -970,24 +970,36 @@ function jumpToThread(threadId: string): void {
   else diffView.scrollToFile(file.id);
 }
 
-/** ⇧C: marks the next open thread (cycling) and says which one, so it reads even when the thread is already on screen. */
-function focusNextOpenThread(): void {
-  const section = dom.descPane.querySelector<HTMLElement>('[data-threads]');
-  const threads = [...(section?.querySelectorAll<HTMLElement>('.thread:not(.is-resolved)') ?? [])];
-  const number = selectedPull()?.number ?? '';
-  if (section == null || threads.length === 0) {
-    const head = currentThreads.length > 0 ? section?.querySelector<HTMLElement>('.conversation-head') : null;
-    if (head != null) scrollDescriptionTo(head);
-    toast(currentThreads.length > 0 ? `All review threads resolved on #${number}` : `No review threads on #${number}`);
+/** ⇧C: if the selected PR still has open threads, resolve all that can be resolved. */
+async function resolveAllOpenThreads(): Promise<void> {
+  const pull = selectedPull();
+  if (pull == null) return;
+  if (pull.openThreads != null && pull.openThreads === 0) {
+    toast(`No open review threads on #${pull.number}`);
     return;
   }
-  const index = (threads.findIndex((thread) => thread.classList.contains('is-active')) + 1) % threads.length;
-  threads.forEach((thread, position) => thread.classList.toggle('is-active', position === index));
-  const target = threads[index]!;
-  scrollDescriptionTo(target);
-  flash(target);
-  const thread = currentThreads.find((candidate) => candidate.id === target.dataset.thread);
-  toast(`Open thread ${index + 1} of ${threads.length}${thread == null ? '' : ` · ${thread.path}${thread.line != null ? `:${thread.line}` : ''}`}${threads.length > 1 ? ' · ⇧C next' : ''}`);
+  const open = currentThreads.filter((thread) => !thread.isResolved && thread.canResolve);
+  if (open.length === 0) {
+    toast(pull.openThreads != null ? `Open threads cannot be resolved by you on #${pull.number}` : `No review threads on #${pull.number}`);
+    return;
+  }
+  for (const thread of open) {
+    try {
+      await setThreadResolved(thread.id, true);
+    } catch (error_) {
+      console.warn('resolve thread failed', errorMessage(error_));
+    }
+  }
+  const section = dom.descPane.querySelector<HTMLElement>('[data-threads]');
+  if (section != null) {
+    const updated = currentThreads.map((thread) => thread.canResolve ? { ...thread, isResolved: true } : thread);
+    renderThreads(section, updated);
+    const remaining = updated.filter((thread) => !thread.isResolved).length;
+    pull.openThreads = remaining;
+    invalidateList();
+  }
+  renderList();
+  toast(`Resolved ${open.length} thread${open.length === 1 ? '' : 's'} on #${pull.number}`);
 }
 
 function scrollDescriptionTo(element: HTMLElement): void {
@@ -3093,7 +3105,7 @@ dom.commentDialog.addEventListener('cancel', (event) => {
 dom.commentSend.addEventListener('click', () => void submitComment());
 element('comment-cancel').addEventListener('click', closeCommentDialog);
 element('comment-button').addEventListener('click', openCommentDialog);
-element('threads-button').addEventListener('click', focusNextOpenThread);
+element('threads-button').addEventListener('click', () => void resolveAllOpenThreads());
 element('open-devin').addEventListener('click', () => void openDevinSession());
 element('message-devin').addEventListener('click', () => void openDevinMessageDialog());
 dom.statusBar.addEventListener('click', (event) => {
@@ -3200,7 +3212,7 @@ const COMMANDS: Command[] = [
   { id: 'toggle-bots', section: 'Pull request', title: 'Show / hide bot comments', aliases: 'devin perry github-actions automated comments conversation', keys: ['⇧b'], run: () => { showBotComments = !showBotComments; localStorage.setItem('showBotComments', showBotComments ? '1' : '0'); const pull = selectedPull(); if (pull != null) renderDetail(pull); toast(showBotComments ? 'Showing bot comments' : 'Hiding bot comments'); } },
   { id: 'diff-style', section: 'Diff', title: 'Toggle split / unified diff', aliases: 'side by side inline view', keys: ['s', '⌘⌥s'], run: toggleStyle },
 
-  { id: 'open-threads', section: 'Pull request', title: 'Next open review thread', aliases: 'unresolved comments threads review feedback resolve', keys: ['⇧c'], run: focusNextOpenThread, isEnabled: hasPull },
+  { id: 'resolve-threads', section: 'Pull request', title: 'Resolve all open review threads', aliases: 'close threads dismiss comments review feedback', keys: ['⇧c'], run: () => void resolveAllOpenThreads(), isEnabled: hasPull },
   { id: 'comment', section: 'Pull request', title: 'Write a comment', aliases: 'reply message mention devin note', keys: ['c'], run: openCommentDialog, isEnabled: hasPull },
   { id: 'approve', section: 'Pull request', title: 'Approve', aliases: 'lgtm review accept', keys: ['a'], run: () => void approveSelected(), isEnabled: () => { const pull = selectedPull(); return pull != null && !isOwnPull(pull); } },
   { id: 'close', section: 'Pull request', title: 'Close (all selected when several are checked)', aliases: 'close reject abandon discard decline won\'t merge', keys: ['⇧w'], run: openCloseDialog, isEnabled: () => closeTargets().length > 0 },
