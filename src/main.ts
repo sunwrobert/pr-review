@@ -2770,13 +2770,24 @@ function devinSessionUrl(html: string): string | null {
   return match == null ? null : match[0].replace('/desktop/session/', '/sessions/');
 }
 
+const devinUrlCache = new Map<string, string>();
+
 async function findDevinSession(pull: PullRequest): Promise<string | null> {
-  const fromBody = devinSessionUrl(await loadBody(pull).catch(() => ''));
-  if (fromBody != null) return fromBody;
-  const items = await loadConversation(pull).catch((): ConversationItem[] => []);
-  for (const item of items) {
+  const cached = devinUrlCache.get(pull.id);
+  if (cached != null) return cached;
+  const bodyPromise = loadBody(pull).catch(() => '');
+  const conversationPromise = loadConversation(pull).catch((): ConversationItem[] => []);
+  const fromBody = devinSessionUrl(await bodyPromise);
+  if (fromBody != null) {
+    devinUrlCache.set(pull.id, fromBody);
+    return fromBody;
+  }
+  for (const item of await conversationPromise) {
     const url = devinSessionUrl(item.html);
-    if (url != null) return url;
+    if (url != null) {
+      devinUrlCache.set(pull.id, url);
+      return url;
+    }
   }
   return null;
 }

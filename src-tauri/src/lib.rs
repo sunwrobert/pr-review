@@ -353,6 +353,125 @@ fn devin_binary() -> String {
 const DEVIN_LOAD_TIMEOUT_SECS: u64 = 60;
 const DEVIN_DELIVERY_TIMEOUT_SECS: u64 = 30;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DevinCredentials {
+    api_key: String,
+    api_url: String,
+}
+
+static DEVIN_ORG: tokio::sync::Mutex<Option<(String, String, String)>> = tokio::sync::Mutex::const_new(None);
+
+fn parse_toml_string(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let inner = trimmed.strip_prefix('"')?.strip_suffix('"')?;
+    Some(inner.replace("\\\"", "\"").replace("\\\\", "\\"))
+}
+
+fn parse_devin_credentials(contents: &str) -> Option<DevinCredentials> {
+    let mut api_key = None;
+    let mut api_url = None;
+    for line in contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('[') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else { continue };
+        match key.trim() {
+            "windsurf_api_key" => api_key = parse_toml_string(value).filter(|text| !text.is_empty()),
+            "devin_api_url" => api_url = parse_toml_string(value).filter(|text| text.starts_with("https://")),
+            _ => {}
+        }
+    }
+    Some(DevinCredentials {
+        api_key: api_key?,
+        api_url: api_url.unwrap_or_else(|| "https://api.devin.ai".to_string()).trim_end_matches('/').to_string(),
+    })
+}
+
+fn read_devin_credentials() -> Option<DevinCredentials> {
+    let mut candidates = Vec::new();
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        if !xdg.is_empty() {
+            candidates.push(std::path::PathBuf::from(xdg).join("devin/credentials.toml"));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            candidates.push(std::path::PathBuf::from(&home).join(".local/share/devin/credentials.toml"));
+            candidates.push(std::path::PathBuf::from(&home).join("Library/Application Support/devin/credentials.toml"));
+        }
+    }
+    candidates
+        .into_iter()
+        .find_map(|path| std::fs::read_to_string(path).ok().and_then(|text| parse_devin_credentials(&text)))
+}
+
+fn extract_devin_org_id(body: &serde_json::Value) -> Option<String> {
+    let org = body
+        .get("devin_sessions_org_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| body.get("org_id").and_then(serde_json::Value::as_str))?;
+    let is_safe = !org.is_empty() && org.len() <= 128 && org.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'));
+    is_safe.then(|| org.to_string())
+}
+
+async fn resolve_devin_org_id(credentials: &DevinCredentials) -> Result<String, String> {
+    let mut cached = DEVIN_ORG.lock().await;
+    if let Some((cached_url, cached_key, org_id)) = cached.as_ref() {
+        if cached_url == &credentials.api_url && cached_key == &credentials.api_key {
+            return Ok(org_id.clone());
+        }
+    }
+    let response = http_client()
+        .get(format!("{}/v3/self", credentials.api_url))
+        .bearer_auth(&credentials.api_key)
+        .send()
+        .await
+        .map_err(|error| format!("Devin API error: {}", error.without_url()))?;
+    let status = response.status();
+    let text = response.text().await.map_err(|error| error.without_url().to_string())?;
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        *cached = None;
+        return Err("Devin sign-in failed; run `devin auth login`".to_string());
+    }
+    if !status.is_success() {
+        return Err(format!("Devin /v3/self returned {status}"));
+    }
+    let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|error| format!("invalid Devin /v3/self response: {error}"))?;
+    let org_id = extract_devin_org_id(&parsed).ok_or("Devin /v3/self did not return an org_id")?;
+    *cached = Some((credentials.api_url.clone(), credentials.api_key.clone(), org_id.clone()));
+    Ok(org_id)
+}
+
+/// Posts directly to Devin's v3 REST API (~200 ms) instead of replaying the full session transcript over `devin acp --cloud` (20-60 s).
+async fn message_devin_http(credentials: &DevinCredentials, session_id: &str, message: &str) -> Result<String, String> {
+    let org_id = resolve_devin_org_id(credentials).await?;
+    let url = format!("{}/v3/organizations/{org_id}/sessions/{}/messages", credentials.api_url, session_id.to_ascii_lowercase());
+    let payload = serde_json::json!({ "message": message }).to_string();
+    let response = http_client()
+        .post(&url)
+        .bearer_auth(&credentials.api_key)
+        .header("Content-Type", "application/json")
+        .body(payload)
+        .send()
+        .await
+        .map_err(|error| format!("Devin API error: {}", error.without_url()))?;
+    let status = response.status();
+    let text = response.text().await.map_err(|error| error.without_url().to_string())?;
+    if status.is_success() {
+        return Ok("delivered".to_string());
+    }
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        *DEVIN_ORG.lock().await = None;
+        return Err("Devin sign-in failed; run `devin auth login`".to_string());
+    }
+    let detail = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| value.get("detail").and_then(serde_json::Value::as_str).map(str::to_string))
+        .unwrap_or_else(|| text.chars().take(200).collect());
+    Err(format!("Devin rejected the message ({status}): {detail}"))
+}
+
 async fn acp_send(stdin: &mut tokio::process::ChildStdin, id: u64, method: &str, params: serde_json::Value) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
     let line = serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string() + "\n";
@@ -394,15 +513,7 @@ async fn acp_await_response(lines: &mut tokio::io::Lines<tokio::io::BufReader<to
     Err("devin acp closed the connection".to_string())
 }
 
-#[tauri::command]
-async fn message_devin(session_id: String, message: String) -> Result<String, String> {
-    let is_valid_session = (16..=64).contains(&session_id.len()) && session_id.chars().all(|character| character.is_ascii_hexdigit());
-    if !is_valid_session {
-        return Err("invalid Devin session id".to_string());
-    }
-    if message.trim().is_empty() || message.len() > MAX_COMMENT_BYTES {
-        return Err("message must be between 1 and 65000 bytes".to_string());
-    }
+async fn message_devin_acp(session_id: &str, message: &str) -> Result<String, String> {
     let workdir = std::env::temp_dir().join("pr-review-devin");
     std::fs::create_dir_all(&workdir).map_err(|error| error.to_string())?;
     let workdir_text = workdir.to_string_lossy().to_string();
@@ -433,11 +544,26 @@ async fn message_devin(session_id: String, message: String) -> Result<String, St
     drop(stdin);
     let _ = child.kill().await;
     match delivery {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => return Err(format!("Devin rejected the message: {error}")),
-        Err(_) => return Err(format!("sent, but Devin didn't confirm within {DEVIN_DELIVERY_TIMEOUT_SECS}s; check the session")),
+        Ok(Ok(())) => Ok("delivered".to_string()),
+        Ok(Err(error)) => Err(format!("Devin rejected the message: {error}")),
+        Err(_) => Err(format!("sent, but Devin didn't confirm within {DEVIN_DELIVERY_TIMEOUT_SECS}s; check the session")),
     }
-    Ok("delivered".to_string())
+}
+
+#[tauri::command]
+async fn message_devin(session_id: String, message: String) -> Result<String, String> {
+    let is_valid_session = (16..=64).contains(&session_id.len()) && session_id.chars().all(|character| character.is_ascii_hexdigit());
+    if !is_valid_session {
+        return Err("invalid Devin session id".to_string());
+    }
+    if message.trim().is_empty() || message.len() > MAX_COMMENT_BYTES {
+        return Err("message must be between 1 and 65000 bytes".to_string());
+    }
+    let credentials = tauri::async_runtime::spawn_blocking(read_devin_credentials).await.ok().flatten();
+    if let Some(credentials) = credentials {
+        return message_devin_http(&credentials, &session_id, &message).await;
+    }
+    message_devin_acp(&session_id, &message).await
 }
 
 #[tauri::command]
@@ -625,7 +751,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_gateway_error, is_read_request, is_retryable_network_error};
+    use super::{extract_devin_org_id, is_gateway_error, is_read_request, is_retryable_network_error, parse_devin_credentials, DevinCredentials};
 
     #[test]
     fn retries_only_failures_before_the_request_is_sent() {
@@ -646,5 +772,30 @@ mod tests {
         assert!(!is_read_request(&["api", "graphql", "-f", "query=mutation($id: ID!) { enqueuePullRequest }"]));
         assert!(!is_read_request(&["api", "repos/o/r/issues/1/comments", "-X", "POST"]));
         assert!(!is_read_request(&["pr", "merge", "1", "-R", "o/r", "--squash"]));
+    }
+
+    #[test]
+    fn parses_devin_credentials_and_org_id() {
+        let toml = "windsurf_api_key = \"sk-test-123\"\ndevin_api_url = \"https://api.devinenterprise.com/\"\n";
+        assert_eq!(
+            parse_devin_credentials(toml),
+            Some(DevinCredentials {
+                api_key: "sk-test-123".to_string(),
+                api_url: "https://api.devinenterprise.com".to_string(),
+            })
+        );
+        assert_eq!(
+            parse_devin_credentials("windsurf_api_key = \"sk-only\"\n"),
+            Some(DevinCredentials {
+                api_key: "sk-only".to_string(),
+                api_url: "https://api.devin.ai".to_string(),
+            })
+        );
+        assert_eq!(parse_devin_credentials("devin_api_url = \"https://api.devin.ai\"\n"), None);
+        assert_eq!(
+            extract_devin_org_id(&serde_json::json!({ "org_id": "org_1", "devin_sessions_org_id": "clerk-org_2" })),
+            Some("clerk-org_2".to_string())
+        );
+        assert_eq!(extract_devin_org_id(&serde_json::json!({ "org_id": "../bad" })), None);
     }
 }
