@@ -123,6 +123,9 @@ button:disabled { opacity: .4; pointer-events: none; }
 #pr-body-split #diff-root { flex: 1; }
 #inspector { width: var(--inspector-w); flex: none; min-width: 0; }
 #diff-root { min-width: 0; min-height: 0; overflow: auto; padding: 0 20px; outline: none; }
+#diff-root::-webkit-scrollbar, #diff-root *::-webkit-scrollbar { width: 16px; height: 16px; }
+#diff-root::-webkit-scrollbar-thumb, #diff-root *::-webkit-scrollbar-thumb { border-width: 3px; border-radius: 16px; min-height: 48px; background-color: color-mix(in srgb, var(--text-4) 70%, transparent); }
+#diff-root::-webkit-scrollbar-thumb:hover, #diff-root *::-webkit-scrollbar-thumb:hover { background-color: var(--text-3); }
 #inspector { display: flex; flex-direction: column; min-height: 0; background: var(--bg); }
 .tone { display: inline-flex; align-items: center; gap: 6px; }
 .tone i { width: 7px; height: 7px; border-radius: 50%; background: var(--text-4); }
