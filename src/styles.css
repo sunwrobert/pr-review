@@ -247,9 +247,13 @@ dialog button:focus-visible { outline: 1px solid var(--accent); outline-offset: 
 #pr-list li.checked.selected { background: rgb(94 106 210 / .18); }
 
 #list-pane { position: relative; }
-#bulk-bar { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; align-items: center; gap: 6px; padding: 8px 8px 8px 14px; background: var(--toast-bg); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 12px 40px rgb(0 0 0 / .5); z-index: 10; flex-wrap: wrap; }
+#bulk-bar { position: absolute; left: 12px; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 6px; padding: 8px 8px 8px 12px; background: var(--toast-bg); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 12px 40px rgb(0 0 0 / .5); z-index: 10; }
+#bulk-bar .bulk-row { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+#bulk-bar .bulk-actions { padding-top: 6px; border-top: 1px solid var(--border-soft); }
+#bulk-bar button.ghost, #bulk-bar button.primary { height: 24px; padding: 0 7px; font-size: 12px; }
+#bulk-bar .bulk-actions #bulk-merge { margin-left: auto; }
 #bulk-bar[hidden] { display: none; }
-#bulk-count { flex: 1; color: var(--text-3); font-size: 12.5px; white-space: nowrap; }
+#bulk-count { flex: 1 1 auto; min-width: 0; margin-right: 4px; color: var(--text-3); font-size: 12px; white-space: nowrap; }
 #bulk-count b { color: var(--text); font-weight: 600; }
 #bulk-count .warn { color: var(--wait); }
 #bulk-bar button kbd:first-of-type { margin-left: 8px; }

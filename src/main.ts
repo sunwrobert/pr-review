@@ -2093,7 +2093,7 @@ function toggleVisualMode(): void {
   visualAnchorId = state.selectedId;
   dom.list.classList.add('visual');
   setChecked([state.selectedId], true);
-  toast('Visual mode: J/K to extend, ⌘↵ merge, ⇧A approve, ⇧F fix, ⇧D message Devin, Esc to exit');
+  toast('Visual mode: J/K to extend, ⌘↵ merge, ⇧A approve, ⇧F fix, ⇧D message Devin, ⇧X triage, Esc to exit');
 }
 
 function syncVisualRange(): void {
@@ -3446,6 +3446,9 @@ element('bulk-unready').addEventListener('click', selectUnready);
 element('bulk-clear').addEventListener('click', clearChecked);
 dom.bulkFix.addEventListener('click', () => void bulkFixWithDevin());
 element('bulk-devin').addEventListener('click', () => void openDevinMessageDialog());
+element('bulk-triage').addEventListener('click', openTriage);
+element('bulk-all').addEventListener('click', selectAllVisible);
+element('bulk-copy').addEventListener('click', copyPullLinks);
 dom.bulkApprove.addEventListener('click', () => void bulkApprove());
 dom.bulkMerge.addEventListener('click', () => void bulkMerge());
 dom.bulkClose.addEventListener('click', openCloseDialog);

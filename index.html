@@ -44,15 +44,22 @@
         <div id="list-empty" class="list-empty" hidden></div>
         <div id="list-skeleton" class="list-skeleton" aria-hidden="true"></div>
         <div id="bulk-bar" hidden>
-          <span id="bulk-count"></span>
-          <button id="bulk-ready" class="ghost" title="Select every Ready PR  ⇧R">Ready <kbd>⇧</kbd><kbd>R</kbd></button>
-          <button id="bulk-unready" class="ghost" title="Select every PR that needs attention  ⇧U">Unready <kbd>⇧</kbd><kbd>U</kbd></button>
-          <button id="bulk-clear" class="ghost" title="Clear selection  Esc or ⌫">Clear <kbd>⌫</kbd></button>
-          <button id="bulk-devin" class="ghost" title="Message every selected PR's Devin session  ⇧D">Devin <kbd>⇧</kbd><kbd>D</kbd></button>
-          <button id="bulk-fix" class="ghost" title="Fix CI / merge conflicts with Devin  ⇧F">Fix <kbd>⇧</kbd><kbd>F</kbd></button>
-          <button id="bulk-close" class="ghost" title="Close selected  ⇧W">Close <kbd>⇧</kbd><kbd>W</kbd></button>
-          <button id="bulk-approve" class="ghost" title="Approve selected  ⇧A">Approve <kbd>⇧</kbd><kbd>A</kbd></button>
-          <button id="bulk-merge" class="primary" title="Merge selected  ⌘↵">Merge <kbd>⌘</kbd><kbd>↵</kbd></button>
+          <div class="bulk-row">
+            <span id="bulk-count"></span>
+            <button id="bulk-clear" class="ghost bulk-clear" title="Clear selection  Esc or ⌫" aria-label="Clear selection">× <kbd>⌫</kbd></button>
+            <button id="bulk-all" class="ghost" title="Select all visible  ⌘A">All <kbd>⌘</kbd><kbd>A</kbd></button>
+            <button id="bulk-ready" class="ghost" title="Select every Ready PR  ⇧R">Ready <kbd>⇧</kbd><kbd>R</kbd></button>
+            <button id="bulk-unready" class="ghost" title="Select every PR that needs attention  ⇧U">Unready <kbd>⇧</kbd><kbd>U</kbd></button>
+          </div>
+          <div class="bulk-row bulk-actions">
+            <button id="bulk-copy" class="ghost" title="Copy selected PRs as linked titles  ⌘C">Copy <kbd>⌘</kbd><kbd>C</kbd></button>
+            <button id="bulk-triage" class="ghost" title="Review what the selected PRs need, then copy an agent prompt or send to Devin  ⇧X">Triage <kbd>⇧</kbd><kbd>X</kbd></button>
+            <button id="bulk-devin" class="ghost" title="Message every selected PR's Devin session  ⇧D">Devin <kbd>⇧</kbd><kbd>D</kbd></button>
+            <button id="bulk-fix" class="ghost" title="Fix CI / merge conflicts with Devin  ⇧F">Fix <kbd>⇧</kbd><kbd>F</kbd></button>
+            <button id="bulk-close" class="ghost" title="Close selected  ⇧W">Close <kbd>⇧</kbd><kbd>W</kbd></button>
+            <button id="bulk-approve" class="ghost" title="Approve selected  ⇧A">Approve <kbd>⇧</kbd><kbd>A</kbd></button>
+            <button id="bulk-merge" class="primary" title="Merge selected  ⌘↵">Merge <kbd>⌘</kbd><kbd>↵</kbd></button>
+          </div>
         </div>
       </section>
       <div class="resizer" data-resize="list" title="Drag to resize · double-click to reset"></div>
