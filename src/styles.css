@@ -635,8 +635,11 @@ diffs-container { --diffs-dark-bg: var(--bg); --diffs-light-bg: var(--bg); }
 .status-bar.h-scroll { height: 40px; }
 .status-bar .chip-meta.readiness .reason { max-width: 280px; }
 .status-bar .chip-meta.branch, .status-bar .chip-meta.branch code, .status-bar .chip-meta.branch code:last-of-type { flex: none; max-width: none; overflow: visible; }
-#pr-head .actions { flex: 0 1 auto; min-width: 0; }
-#pr-head .actions .search { flex: 0 1 200px; min-width: 96px; }
+/* Narrow panes wrap the toolbar onto extra rows instead of squishing buttons; the header grows to fit. */
+#pr-head { height: auto; min-height: var(--titlebar-h); flex-wrap: wrap; row-gap: 6px; padding-top: 8px; padding-bottom: 8px; align-items: center; }
+#pr-head .actions { flex: 0 1 auto; min-width: 0; flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
+#pr-head .actions > * { flex-shrink: 0; }
+#pr-head .actions .search { flex: 0 1 200px; min-width: 120px; }
 
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 #list-pane .pane-head .head-title { gap: 6px; min-width: 0; flex: 1; }
