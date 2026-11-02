@@ -439,9 +439,14 @@ function selectedPull(): PullRequest | undefined {
   return pullById(state.selectedId);
 }
 
+function queuePosition(entry: NonNullable<PullRequest['queueEntry']>): string {
+  return entry.position < 0 ? 'In merge queue' : `In merge queue #${entry.position + 1}`;
+}
+
 function queueLabel(pull: PullRequest): string {
   const entry = pull.queueEntry;
   if (entry == null) return '';
+  if (entry.position < 0) return 'Added to the merge queue · waiting for GitHub to confirm';
   const phase = entry.state === 'AWAITING_CHECKS' ? 'running checks' : entry.state === 'MERGEABLE' ? 'merging' : entry.state === 'UNMERGEABLE' ? 'failed' : entry.state.toLowerCase().replace(/_/g, ' ');
   return `In merge queue · #${entry.position + 1} · ${phase}`;
 }
@@ -754,7 +759,7 @@ function syncDetailVisibility(pulls: PullRequest[]): void {
 }
 
 function mergeState(pull: PullRequest): { label: string; tone: string } {
-  if (pull.queueEntry != null) return { label: pull.queueEntry.state === 'UNMERGEABLE' ? 'Queue failed' : `In merge queue #${pull.queueEntry.position + 1}`, tone: pull.queueEntry.state === 'UNMERGEABLE' ? 'bad' : 'wait' };
+  if (pull.queueEntry != null) return { label: pull.queueEntry.state === 'UNMERGEABLE' ? 'Queue failed' : queuePosition(pull.queueEntry), tone: pull.queueEntry.state === 'UNMERGEABLE' ? 'bad' : 'wait' };
   if (pull.isDraft) return { label: 'Draft', tone: 'muted' };
   if (pull.mergeable === 'CONFLICTING') return { label: 'Conflicts', tone: 'bad' };
   switch (pull.mergeStateStatus) {
@@ -1227,8 +1232,8 @@ function renderDetailMeta(pull: PullRequest): void {
   dom.approve.disabled = isOwn;
   dom.approve.title = isOwn ? 'You can’t approve your own pull request' : 'Approve  A';
   if (pull.queueEntry != null) {
-    dom.merge.innerHTML = `${MERGE_ICON}<span class="merge-count">#${pull.queueEntry.position + 1}</span>`;
-    dom.merge.title = `In merge queue #${pull.queueEntry.position + 1}`;
+    dom.merge.innerHTML = `${MERGE_ICON}<span class="merge-count">${pull.queueEntry.position < 0 ? 'Queued' : `#${pull.queueEntry.position + 1}`}</span>`;
+    dom.merge.title = queuePosition(pull.queueEntry);
   }
 }
 
@@ -1750,7 +1755,7 @@ function refresh(kind: QueueKind, isForced = false): Promise<void> {
   const pending = fetchQueue(kind)
     .then((pulls) => {
       lastFetchedAt.set(kind, Date.now());
-      const merged = pulls.map((pull) => mergeStateCache.has(pull.id) && mergeStateCache.get(pull.id)?.updatedAt === pull.updatedAt ? { ...pull, ...mergeStateCache.get(pull.id)?.state } : pull);
+      const merged = pulls.map((pull) => withOptimisticQueue(mergeStateCache.has(pull.id) && mergeStateCache.get(pull.id)?.updatedAt === pull.updatedAt ? { ...pull, ...mergeStateCache.get(pull.id)?.state } : pull));
       queueCache.set(kind, merged);
       renderCounts();
       if (kind === state.kind) applyQueue(merged);
@@ -2237,11 +2242,59 @@ function finishLeaving(id: string): void {
 
 const MERGE_CONCURRENCY = 3;
 
+/** Queued PRs stay open, so they stay in the list. GitHub enqueues asynchronously, so until it reports an entry we show one ourselves. */
+const QUEUE_CONFIRM_MS = 10 * 60_000;
+const PENDING_QUEUE_ENTRY = { position: -1, state: 'PENDING' } as const satisfies NonNullable<PullRequest['queueEntry']>;
+const optimisticQueued = new Map<string, number>();
+
+function withOptimisticQueue(pull: PullRequest): PullRequest {
+  if (pull.queueEntry != null) {
+    optimisticQueued.delete(pull.id);
+    return pull;
+  }
+  const expiresAt = optimisticQueued.get(pull.id);
+  if (expiresAt == null) return pull;
+  if (Date.now() > expiresAt) {
+    optimisticQueued.delete(pull.id);
+    return pull;
+  }
+  return { ...pull, queueEntry: PENDING_QUEUE_ENTRY };
+}
+
+/** The pull plus the PRs below it in its stack: one queue of the top lands them all. */
+function queuedTogether(pull: PullRequest): PullRequest[] {
+  const slot = stackSlots.get(pull.id);
+  if (slot == null) return [pull];
+  return state.pulls.filter((candidate) => {
+    const other = stackSlots.get(candidate.id);
+    return other != null && other.stackId === slot.stackId && other.index <= slot.index;
+  });
+}
+
+function markQueued(pull: PullRequest): void {
+  const ids = new Set(queuedTogether(pull).map((target) => target.id));
+  const expiresAt = Date.now() + QUEUE_CONFIRM_MS;
+  ids.forEach((id) => {
+    optimisticQueued.set(id, expiresAt);
+    leaving.delete(id);
+    window.clearTimeout(leaveTimers.get(id));
+    leaveTimers.delete(id);
+  });
+  const apply = (pulls: PullRequest[]): PullRequest[] => pulls.map((candidate) => (ids.has(candidate.id) ? withOptimisticQueue(candidate) : candidate));
+  state.pulls = apply(state.pulls);
+  queueCache.forEach((pulls, kind) => queueCache.set(kind, apply(pulls)));
+  invalidateList();
+  renderList();
+  const selected = selectedPull();
+  if (selected != null && ids.has(selected.id)) renderDetailMeta(selected);
+}
+
 async function runMerge(pull: PullRequest, isQueued: boolean): Promise<string | null> {
   markPending(pull, isQueued ? 'Queueing…' : 'Merging…');
   try {
     await mergePull(pull, MERGE_METHOD, isQueued);
-    markLeaving(pull, isQueued ? 'Queued' : 'Merged');
+    if (isQueued) markQueued(pull);
+    else markLeaving(pull, 'Merged');
     return null;
   } catch (error) {
     rollbackPending(pull);
