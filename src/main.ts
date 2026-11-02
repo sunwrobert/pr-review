@@ -2093,7 +2093,7 @@ function toggleVisualMode(): void {
   visualAnchorId = state.selectedId;
   dom.list.classList.add('visual');
   setChecked([state.selectedId], true);
-  toast('Visual mode: J/K to extend, ⌘↵ merge, ⇧A approve, ⇧F fix, Esc to exit');
+  toast('Visual mode: J/K to extend, ⌘↵ merge, ⇧A approve, ⇧F fix, ⇧D message Devin, Esc to exit');
 }
 
 function syncVisualRange(): void {
@@ -2936,22 +2936,38 @@ const themePicker = new ThemePicker({
   cancel: () => applyTheme(),
 });
 
-type CommentMode = { kind: 'github' } | { kind: 'devin'; sessionId: string };
+type CommentMode = { kind: 'github' } | { kind: 'devin'; sessionId: string } | { kind: 'devin-bulk'; pulls: PullRequest[] };
 
 const commentDrafts = new Map<string, string>();
 let commentTarget: PullRequest | null = null;
 let commentMode: CommentMode = { kind: 'github' };
 
-const draftKey = (pull: PullRequest, mode: CommentMode): string => (mode.kind === 'devin' ? `devin:${pull.id}` : pull.id);
+const draftKey = (pull: PullRequest, mode: CommentMode): string => (mode.kind === 'devin-bulk' ? 'devin:bulk' : mode.kind === 'devin' ? `devin:${pull.id}` : pull.id);
+
+function commentDialogCopy(pull: PullRequest, mode: CommentMode): { title: string; hint: string; placeholder: string; send: string } {
+  switch (mode.kind) {
+    case 'github':
+      return { title: `Comment on #${pull.number}`, hint: `${pull.repository.nameWithOwner} · ${pull.title}`, placeholder: 'Leave a comment… (markdown, @mentions work)', send: 'Comment' };
+    case 'devin':
+      return { title: `Message Devin about #${pull.number}`, hint: `Sent straight to the linked Devin session · ${pull.title}`, placeholder: 'Tell Devin what to do… (goes to the session, not GitHub)', send: 'Send to Devin' };
+    case 'devin-bulk': {
+      const count = mode.pulls.length;
+      return { title: `Message Devin about ${count} PRs`, hint: `Sent to each PR's linked Devin session · ${mode.pulls.map((target) => `#${target.number}`).join(', ')}`, placeholder: 'Tell every Devin session what to do… (goes to the sessions, not GitHub)', send: `Send to ${count} Devin sessions` };
+    }
+    default:
+      return mode satisfies never;
+  }
+}
 
 function showCommentDialog(pull: PullRequest, mode: CommentMode): void {
   commentTarget = pull;
   commentMode = mode;
-  dom.commentDialog.dataset.mode = mode.kind;
-  dom.commentTitle.textContent = mode.kind === 'devin' ? `Message Devin about #${pull.number}` : `Comment on #${pull.number}`;
-  dom.commentHint.textContent = mode.kind === 'devin' ? `Sent straight to the linked Devin session · ${pull.title}` : `${pull.repository.nameWithOwner} · ${pull.title}`;
-  dom.commentBody.placeholder = mode.kind === 'devin' ? 'Tell Devin what to do… (goes to the session, not GitHub)' : 'Leave a comment… (markdown, @mentions work)';
-  dom.commentSendLabel.textContent = mode.kind === 'devin' ? 'Send to Devin' : 'Comment';
+  dom.commentDialog.dataset.mode = mode.kind === 'github' ? 'github' : 'devin';
+  const copy = commentDialogCopy(pull, mode);
+  dom.commentTitle.textContent = copy.title;
+  dom.commentHint.textContent = copy.hint;
+  dom.commentBody.placeholder = copy.placeholder;
+  dom.commentSendLabel.textContent = copy.send;
   dom.commentBody.value = commentDrafts.get(draftKey(pull, mode)) ?? '';
   dom.commentSend.disabled = dom.commentBody.value.trim() === '';
   dom.commentDialog.showModal();
@@ -2969,7 +2985,12 @@ function devinSessionId(url: string): string | null {
 }
 
 async function openDevinMessageDialog(): Promise<void> {
-  const pull = selectedPull();
+  const checked = checkedPulls().filter((target) => !leaving.has(target.id));
+  if (checked.length > 1) {
+    showCommentDialog(checked[0]!, { kind: 'devin-bulk', pulls: checked });
+    return;
+  }
+  const pull = checked[0] ?? selectedPull();
   if (pull == null) return;
   const url = await findDevinSession(pull);
   const sessionId = url == null ? null : devinSessionId(url);
@@ -2977,7 +2998,7 @@ async function openDevinMessageDialog(): Promise<void> {
     toast(`No Devin session linked on #${pull.number}`, true);
     return;
   }
-  if (selectedPull()?.id === pull.id) showCommentDialog(pull, { kind: 'devin', sessionId });
+  if (selectedPull()?.id === pull.id || state.checkedIds.has(pull.id)) showCommentDialog(pull, { kind: 'devin', sessionId });
 }
 
 function closeCommentDialog(): void {
@@ -2997,6 +3018,14 @@ async function submitComment(): Promise<void> {
   if (pull == null || body === '' || dom.commentSend.disabled) return;
   if (mode.kind === 'devin') {
     sendToDevin(pull, mode.sessionId, body);
+    return;
+  }
+  if (mode.kind === 'devin-bulk') {
+    commentDrafts.delete(draftKey(pull, mode));
+    dom.commentBody.value = '';
+    commentTarget = null;
+    dom.commentDialog.close();
+    void sendTriageToDevin(mode.pulls, () => body);
     return;
   }
   dom.commentSend.disabled = true;
@@ -3231,7 +3260,7 @@ const COMMANDS: Command[] = [
   { id: 'description', section: 'Navigate', title: 'Jump to description', keys: ['⌘↑'], run: () => diffView.scrollToTop(), isEnabled: hasPull },
   { id: 'devin', section: 'Pull request', title: 'Open Devin session', aliases: 'devin agent session link', keys: ['d'], run: () => void openDevinSession(), isEnabled: hasPull },
   { id: 'fix-with-devin', section: 'Pull request', title: 'Fix CI / merge conflicts with Devin (all selected when several are checked)', aliases: 'conflict rebase devin resolve merge fix ci checks failing bulk', keys: ['⇧f'], run: () => void fixWithDevin(), isEnabled: () => state.checkedIds.size > 0 || (selectedPull() != null && devinFixMessage(selectedPull()!) != null) },
-  { id: 'message-devin', section: 'Pull request', title: 'Message Devin session', aliases: 'devin agent session send tell ask chat', keys: ['⇧d'], run: () => void openDevinMessageDialog(), isEnabled: hasPull },
+  { id: 'message-devin', section: 'Pull request', title: 'Message Devin session (all selected when several are checked)', aliases: 'devin agent session send tell ask chat bulk', keys: ['⇧d'], run: () => void openDevinMessageDialog(), isEnabled: () => hasPull() || state.checkedIds.size > 0 },
 
   ...VIM_COMMANDS,
   ...DIFF_SCROLL_COMMANDS,
@@ -3416,6 +3445,7 @@ element('bulk-ready').addEventListener('click', selectReady);
 element('bulk-unready').addEventListener('click', selectUnready);
 element('bulk-clear').addEventListener('click', clearChecked);
 dom.bulkFix.addEventListener('click', () => void bulkFixWithDevin());
+element('bulk-devin').addEventListener('click', () => void openDevinMessageDialog());
 dom.bulkApprove.addEventListener('click', () => void bulkApprove());
 dom.bulkMerge.addEventListener('click', () => void bulkMerge());
 dom.bulkClose.addEventListener('click', openCloseDialog);
