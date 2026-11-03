@@ -37,20 +37,17 @@ describe('parsePastedOrder', () => {
 });
 
 describe('applyPastedOrder', () => {
-  test('puts pasted PRs first in pasted order and keeps the rest in place', () => {
+  test('shows only the pasted PRs, in pasted order', () => {
     const pulls = [1, 2, 3, 4, 5].map(pull);
-    expect(applyPastedOrder(pulls, { numbers: [4, 2], headings: new Map() }).map((item) => item.number)).toEqual([4, 2, 1, 3, 5]);
+    expect(applyPastedOrder(pulls, { numbers: [4, 9, 2], headings: new Map() }).map((item) => item.number)).toEqual([4, 2]);
   });
 
-  test('property: output is a permutation, pasted PRs lead in pasted order, the rest keep relative order', () => {
+  test('property: output is exactly the pasted PRs that are present, in pasted order', () => {
     fc.assert(
       fc.property(fc.uniqueArray(fc.integer({ min: 1, max: 60 }), { maxLength: 40 }), fc.uniqueArray(fc.integer({ min: 1, max: 80 }), { maxLength: 30 }), (present, pasted) => {
         const pulls = present.map(pull);
         const result = applyPastedOrder(pulls, { numbers: pasted, headings: new Map() }).map((item) => item.number);
-        expect([...result].sort((a, b) => a - b)).toEqual([...present].sort((a, b) => a - b));
-        const lead = pasted.filter((number) => present.includes(number));
-        expect(result.slice(0, lead.length)).toEqual(lead);
-        expect(result.slice(lead.length)).toEqual(present.filter((number) => !pasted.includes(number)));
+        expect(result).toEqual(pasted.filter((number) => present.includes(number)));
       }),
       { numRuns: 1_000 },
     );

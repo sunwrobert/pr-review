@@ -585,7 +585,7 @@ interface ListSection {
 function pastedSections(pulls: PullRequest[], order: PastedOrder): ListSection[] {
   const sections: ListSection[] = [];
   for (const pull of pulls) {
-    const label = order.headings.get(pull.number) ?? (order.numbers.includes(pull.number) ? 'Pasted order' : 'Not in pasted list');
+    const label = order.headings.get(pull.number) ?? 'Pasted order';
     const last = sections.at(-1);
     if (last?.group?.label === label) last.pulls.push(pull);
     else sections.push({ group: { id: `pasted:${sections.length}:${label}`, label, pullIds: [] }, pulls: [pull] });
@@ -1948,6 +1948,17 @@ function setPastedOrder(order: PastedOrder | null): void {
   renderPastedChip();
   const first = visiblePulls()[0];
   if (order != null && first != null) void select(first);
+  if (order != null) selectPasted(order);
+}
+
+/** A pasted list is usually something to act on in bulk, so its PRs start out checked. */
+function selectPasted(order: PastedOrder): void {
+  const numbers = new Set(order.numbers);
+  const ids = visiblePulls().filter((pull) => numbers.has(pull.number) && !leaving.has(pull.id)).map((pull) => pull.id);
+  clearChecked();
+  if (ids.length === 0) return;
+  checkAnchorId = ids[0] ?? null;
+  setChecked(ids, true);
 }
 
 function renderPastedChip(): void {
@@ -1971,7 +1982,7 @@ function applyPastedText(text: string): boolean {
   setPastedOrder(order);
   const matched = state.pulls.filter((pull) => order.numbers.includes(pull.number)).length;
   const missing = order.numbers.length - matched;
-  toast(`Sorted by your list · ${matched} PR${matched === 1 ? '' : 's'} in this view${missing > 0 ? ` · ${missing} not here (other view or closed)` : ''} · ⌥⌫ to clear`);
+  toast(`Showing and selected your list · ${matched} PR${matched === 1 ? '' : 's'}${missing > 0 ? ` · ${missing} not in this view (other view or closed)` : ''} · Esc to deselect, Esc again to show every PR`);
   return true;
 }
 
@@ -1996,7 +2007,7 @@ async function showPastedStack(repo: string, number: number): Promise<void> {
     setPastedOrder({ numbers: ordered.map((member) => member.number), headings: new Map(ordered.map((member) => [member.number, heading])) });
     const pasted = pullById(pull.id);
     if (pasted != null) void select(pasted);
-    toast(ordered.length > 1 ? `Stack of #${number} · ${ordered.length} open PRs, bottom first · ⌥⌫ to clear` : `#${number} is not stacked · ⌥⌫ to clear`);
+    toast(ordered.length > 1 ? `Stack of #${number} · ${ordered.length} open PRs selected, bottom first · Esc to deselect, Esc again to clear` : `#${number} is not stacked · Esc to clear`);
   } catch (error) {
     if (token === pastedStackToken) toast(`Could not load ${repo}#${number}: ${errorMessage(error)}`, true);
   }
@@ -3278,8 +3289,8 @@ const COMMANDS: Command[] = [
   { id: 'smart-tested', section: 'Filter', title: 'Show end-to-end tested', aliases: 'e2e verified qa proof screenshots recording', keys: ['⌥5'], run: () => setSmartFilter('tested') },
   { id: 'smart-threads', section: 'Filter', title: 'Show PRs with open review threads', aliases: 'unresolved comments threads feedback', keys: ['⌥6'], run: () => setSmartFilter('threads') },
   { id: 'smart-attention', section: 'Filter', title: 'Show PRs that need attention', aliases: 'unapproved conflicts failing blocked red yellow triage', keys: ['⌥4'], run: () => setSmartFilter('attention') },
-  { id: 'paste-order', section: 'Filter', title: 'Sort by a pasted list of PRs (just ⌘V anywhere outside a text box)', aliases: 'paste order ranking priority report clipboard', keys: ['⇧o'], run: () => void navigator.clipboard.readText().then((text) => applyPastedText(text) || toast('No PR numbers found on the clipboard', true), () => toast('Press ⌘V to paste your list', true)) },
-  { id: 'paste-order-clear', section: 'Filter', title: 'Clear pasted order', aliases: 'reset sort pasted', keys: ['⌥⌫'], run: () => { setPastedOrder(null); toast('Back to the normal order'); }, isEnabled: () => pastedOrder != null },
+  { id: 'paste-order', section: 'Filter', title: 'Show only a pasted list of PRs (just ⌘V anywhere outside a text box)', aliases: 'paste order ranking priority report clipboard', keys: ['⇧o'], run: () => void navigator.clipboard.readText().then((text) => applyPastedText(text) || toast('No PR numbers found on the clipboard', true), () => toast('Press ⌘V to paste your list', true)) },
+  { id: 'paste-order-clear', section: 'Filter', title: 'Clear pasted list (show every PR again)', aliases: 'reset sort pasted order', keys: ['⌥⌫', 'esc'], run: () => { setPastedOrder(null); toast('Showing every PR again'); }, isEnabled: () => pastedOrder != null && state.checkedIds.size === 0 },
   { id: 'group', section: 'Filter', title: 'Group related work', aliases: 'cluster effort category batch smart group', keys: ['⇧t'], run: toggleGrouping },
   { id: 'regroup', section: 'Filter', title: 'Regroup', aliases: 'refresh groups cluster', keys: [], run: () => { groupsSignature = ''; localStorage.removeItem(GROUPS_CACHE_KEY); void ensureGroups(true); } },
   { id: 'sort', section: 'Filter', title: 'Cycle sort (smart / updated / smallest)', aliases: 'order', keys: ['⇧s'], run: cycleSortOrder },
@@ -3468,7 +3479,7 @@ wireFindBar();
 element('pasted-order').addEventListener('click', (event) => {
   if ((event.target as HTMLElement).closest('.pasted-clear') != null) {
     setPastedOrder(null);
-    toast('Back to the normal order');
+    toast('Showing every PR again');
   }
 });
 renderPastedChip();

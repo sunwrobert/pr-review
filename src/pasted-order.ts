@@ -47,11 +47,10 @@ export function parsePastedOrder(text: string): PastedOrder {
 }
 
 /** Puts pasted PRs first in pasted order; everything else keeps its existing order after them. */
+/** Only the pasted PRs, in pasted order; everything else is hidden until the order is cleared. */
 export function applyPastedOrder(pulls: readonly PullRequest[], order: PastedOrder): PullRequest[] {
   const rank = new Map(order.numbers.map((number, index) => [number, index]));
-  const listed = pulls.filter((pull) => rank.has(pull.number)).sort((left, right) => (rank.get(left.number) ?? 0) - (rank.get(right.number) ?? 0));
-  const rest = pulls.filter((pull) => !rank.has(pull.number));
-  return [...listed, ...rest];
+  return pulls.filter((pull) => rank.has(pull.number)).sort((left, right) => (rank.get(left.number) ?? 0) - (rank.get(right.number) ?? 0));
 }
 
 const PULL_URL = /github\.com\/([\w.-]+\/[\w.-]+)\/pull\/(\d{1,7})\b/;

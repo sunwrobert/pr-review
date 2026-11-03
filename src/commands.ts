@@ -91,11 +91,13 @@ export class CommandRegistry {
   handle(event: KeyboardEvent, isTyping: boolean): boolean {
     if (isTyping && isTextEditingChord(event)) return false;
     if (event.key === 'Shift' || event.key === 'Meta' || event.key === 'Control' || event.key === 'Alt' || event.repeat === false && event.key === 'CapsLock') return false;
+    // Several commands may share a key (Esc clears the selection, then the pasted list); the first enabled one wins.
     const command = this.commands.find((candidate) => {
       if (isTyping && candidate.allowWhileTyping !== true) return false;
-      return (this.chords.get(candidate) ?? []).some((chord) => matches(chord, event) && (!isTyping || chord.meta || chord.ctrl));
+      const isMatch = (this.chords.get(candidate) ?? []).some((chord) => matches(chord, event) && (!isTyping || chord.meta || chord.ctrl));
+      return isMatch && candidate.isEnabled?.() !== false;
     });
-    if (command == null || command.isEnabled?.() === false) return false;
+    if (command == null) return false;
     event.preventDefault();
     command.run();
     return true;
