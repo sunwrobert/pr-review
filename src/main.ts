@@ -2068,12 +2068,20 @@ function setChecked(ids: Iterable<string>, isChecked: boolean): void {
 
 let checkAnchorId: string | null = null;
 
+/** Shift-click ranges from the last checked row, or, before anything is checked, from the open PR (like a file manager). */
+function rangeAnchorId(): string | null {
+  if (state.checkedIds.size === 0) return state.selectedId;
+  return checkAnchorId ?? state.selectedId;
+}
+
 function toggleChecked(id: string, isRange: boolean): void {
   const pulls = visiblePulls();
-  const anchorIndex = pulls.findIndex((pull) => pull.id === checkAnchorId);
+  const anchorId = isRange ? rangeAnchorId() : null;
+  const anchorIndex = pulls.findIndex((pull) => pull.id === anchorId);
   const targetIndex = pulls.findIndex((pull) => pull.id === id);
-  if (isRange && anchorIndex >= 0 && targetIndex >= 0) {
+  if (isRange && anchorIndex >= 0 && targetIndex >= 0 && anchorIndex !== targetIndex) {
     const [start, end] = anchorIndex < targetIndex ? [anchorIndex, targetIndex] : [targetIndex, anchorIndex];
+    checkAnchorId = anchorId;
     setChecked(pulls.slice(start, end + 1).map((pull) => pull.id), true);
     return;
   }
