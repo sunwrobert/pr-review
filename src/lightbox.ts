@@ -60,6 +60,26 @@ export function collectMedia(root: HTMLElement): MediaItem[] {
   return items;
 }
 
+/** Never shrink an image below this share of its pixel size: a 2x screenshot at 0.5 is its real on-screen size, so text stays readable. */
+const MIN_FIT_SCALE = 0.5;
+
+interface Size {
+  width: number;
+  height: number;
+}
+
+/**
+ * Scale for the lightbox: the whole image when that keeps at least `MIN_FIT_SCALE`, otherwise `MIN_FIT_SCALE` (scrolling the rest),
+ * never wider than the box or larger than the image. `scrolls` is whether the result is taller than the box.
+ */
+export function lightboxScale(natural: Size, box: Size): { scale: number; scrolls: boolean } {
+  if (natural.width <= 0 || natural.height <= 0 || box.width <= 0 || box.height <= 0) return { scale: 1, scrolls: false };
+  const fitWidth = Math.min(box.width / natural.width, 1);
+  const fitWhole = Math.min(fitWidth, box.height / natural.height);
+  const scale = Math.min(fitWidth, Math.max(fitWhole, MIN_FIT_SCALE));
+  return { scale, scrolls: natural.height * scale > box.height + 1 };
+}
+
 export class Lightbox {
   private readonly dialog: HTMLDialogElement;
   private readonly stage: HTMLElement;
@@ -73,9 +93,8 @@ export class Lightbox {
     this.dialog = document.createElement('dialog');
     this.dialog.id = 'lightbox';
     this.dialog.innerHTML = `
-      <div class="lb-top"><span class="lb-actions"><button class="lb-open" title="Open in browser  O">Open <kbd>O</kbd></button><button class="lb-close" title="Close  esc / Q">Close <kbd>esc</kbd></button></span></div>
       <div class="lb-stage"></div>
-      <div class="lb-footer"><span class="lb-counter"></span><span class="lb-caption"></span></div>
+      <div class="lb-footer"><span class="lb-counter"></span><span class="lb-caption"></span><span class="lb-actions"><button class="lb-open" title="Open in browser  O">Open <kbd>O</kbd></button><button class="lb-close" title="Close  esc / Q">Close <kbd>esc</kbd></button></span></div>
       <button class="lb-nav lb-prev" title="Previous  ← / H">‹</button><button class="lb-nav lb-next" title="Next  → / L">›</button>`;
     document.body.append(this.dialog);
     this.stage = this.dialog.querySelector('.lb-stage') as HTMLElement;
@@ -91,6 +110,21 @@ export class Lightbox {
     });
     this.dialog.addEventListener('keydown', this.handleKey);
     this.dialog.addEventListener('close', () => this.stage.replaceChildren());
+    window.addEventListener('resize', () => {
+      const image = this.stage.querySelector('img');
+      if (this.dialog.open && image != null) this.applyFit(image);
+    });
+  }
+
+  private applyFit(image: HTMLImageElement): void {
+    const style = getComputedStyle(this.stage);
+    const box = {
+      width: this.stage.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
+      height: this.stage.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
+    };
+    const { scale, scrolls } = lightboxScale({ width: image.naturalWidth, height: image.naturalHeight }, box);
+    this.stage.classList.toggle('fit-width', scrolls);
+    image.style.width = scrolls ? `${Math.round(image.naturalWidth * scale)}px` : '';
   }
 
   get isOpen(): boolean {
@@ -142,13 +176,18 @@ export class Lightbox {
   private toggleZoom(): void {
     this.zoomed = !this.zoomed;
     this.stage.classList.toggle('zoomed', this.zoomed);
+    const image = this.stage.querySelector('img');
+    if (image == null) return;
+    if (this.zoomed) image.style.removeProperty('width');
+    else this.applyFit(image);
   }
 
   private render(): void {
     const item = this.items[this.index];
     if (item == null) return;
     this.zoomed = false;
-    this.stage.classList.remove('zoomed');
+    this.stage.classList.remove('zoomed', 'fit-width');
+    this.stage.querySelector('img')?.style.removeProperty('width');
     this.counter.textContent = `${this.index + 1} / ${this.items.length}`;
     this.caption.textContent = item.label;
     this.dialog.classList.toggle('single', this.items.length < 2);
@@ -164,6 +203,11 @@ export class Lightbox {
         image.src = item.url;
         image.alt = item.label;
         image.draggable = false;
+        const fit = (): void => {
+          if (image.isConnected) this.applyFit(image);
+        };
+        image.addEventListener('load', fit, { once: true });
+        if (image.complete) requestAnimationFrame(fit);
         return image;
       }
       case 'video': {

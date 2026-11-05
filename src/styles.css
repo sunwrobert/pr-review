@@ -347,15 +347,18 @@ img { -webkit-user-drag: none; }
 #lightbox { width: 100vw; height: 100vh; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; border-radius: 0; background: rgb(8 8 10 / .94); color: var(--text-2); }
 #lightbox::backdrop { background: rgb(0 0 0 / .6); backdrop-filter: blur(6px); }
 #lightbox[open] { display: flex; flex-direction: column; }
-.lb-top { display: flex; align-items: center; justify-content: flex-end; gap: 14px; height: 48px; padding: 0 16px 0 20px; flex: none; }
-.lb-footer { flex: none; display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 64px; padding: 0 80px 18px; }
+.lb-footer { flex: none; position: relative; display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 44px; padding: 0 180px 0 80px; }
+.lb-footer .lb-actions { position: absolute; right: 16px; top: 50%; transform: translateY(-50%); }
 .lb-counter { flex: none; color: var(--accent-fg); background: var(--accent); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; padding: 4px 10px; border-radius: 999px; letter-spacing: .02em; }
-.lb-caption { color: var(--text); font-size: 17px; font-weight: 600; letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(900px, 70vw); text-shadow: 0 1px 12px rgb(0 0 0 / .6); }
+.lb-caption { color: var(--text); font-size: 15px; font-weight: 600; letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: min(900px, 70vw); text-shadow: 0 1px 12px rgb(0 0 0 / .6); }
 .lb-actions { display: flex; gap: 6px; }
 .lb-actions button { height: 28px; padding: 0 10px; border-radius: var(--radius); border: 1px solid var(--border); background: #1b1c1f; color: var(--text-2); font-size: 12.5px; }
 .lb-actions button:hover { color: var(--text); background: #232427; }
 .lb-actions kbd { margin-left: 6px; }
-.lb-stage { flex: 1; min-height: 0; display: grid; place-items: center; padding: 0 72px 8px; overflow: auto; }
+.lb-stage { flex: 1; min-height: 0; display: grid; place-items: center; padding: 12px 72px 4px; overflow: auto; }
+/* Too tall to fit whole at a readable size: fill the width and scroll (arrow keys and J/K scroll before stepping). */
+.lb-stage.fit-width { place-items: start center; }
+.lb-stage.fit-width img { max-height: none; }
 .lb-stage img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; box-shadow: 0 20px 80px rgb(0 0 0 / .6); cursor: zoom-in; user-select: none; }
 .lb-stage.zoomed { place-items: start center; }
 .lb-stage.zoomed img { max-width: none; max-height: none; cursor: zoom-out; }
