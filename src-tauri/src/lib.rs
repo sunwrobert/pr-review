@@ -212,6 +212,21 @@ async fn threads(repo: String, number: u64) -> Result<String, String> {
     .await
 }
 
+/// Takes a pull out of its merge queue. GitHub has no REST endpoint for this, only the GraphQL mutation.
+#[tauri::command]
+async fn dequeue(pull_id: String) -> Result<String, String> {
+    if !is_node_id(&pull_id) {
+        return Err("invalid pull request id".to_string());
+    }
+    let query = "mutation($id: ID!) { dequeuePullRequest(input: { id: $id }) { mergeQueueEntry { id } } }";
+    let output = gh(&["api", "graphql", "-f", &format!("query={query}"), "-F", &format!("id={pull_id}")]).await?;
+    let parsed: serde_json::Value = serde_json::from_str(&output).map_err(|error| error.to_string())?;
+    if let Some(message) = parsed["errors"][0]["message"].as_str() {
+        return Err(message.to_string());
+    }
+    Ok("dequeued".to_string())
+}
+
 #[tauri::command]
 async fn set_thread_resolved(thread_id: String, resolved: bool) -> Result<String, String> {
     if !is_node_id(&thread_id) {
@@ -743,7 +758,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, pull, stack_neighbors, viewer, comment, message_devin, threads, set_thread_resolved, reply_to_thread, merge_queue, merge_states, conversation, body, diff, approve, merge, close, open_in_browser, review_context, readiness_available, readiness, group_files])
+        .invoke_handler(tauri::generate_handler![queue, pull, stack_neighbors, viewer, comment, message_devin, threads, dequeue, set_thread_resolved, reply_to_thread, merge_queue, merge_states, conversation, body, diff, approve, merge, close, open_in_browser, review_context, readiness_available, readiness, group_files])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }

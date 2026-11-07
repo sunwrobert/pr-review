@@ -770,6 +770,11 @@ button.primary, #pr-head .actions button { transition: background-color .12s lin
 #pr-list li.vl-highlight.visible { opacity: 1; }
 
 #merge.merge-icon { gap: 6px; padding: 0 9px; }
+/* A queued PR's merge button turns into Dequeue: neutral, so it never reads as "merge". */
+#merge.merge-icon.dequeue { background: var(--bg-elev); border-color: var(--border); color: var(--text-2); }
+#merge.merge-icon.dequeue:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
+#merge.merge-icon.dequeue .merge-count { color: var(--wait); }
+#merge.merge-icon.dequeue kbd { background: var(--bg-hover); color: var(--text-3); }
 #merge.merge-icon kbd { background: rgb(255 255 255 / .16); border-color: transparent; color: rgb(255 255 255 / .9); }
 #merge.merge-icon kbd:first-of-type { margin-left: 2px; }
 #pr-head .actions kbd, #pr-head .head-left kbd, .search kbd, .filter-bar .chip kbd, #bulk-bar kbd, #merge kbd {

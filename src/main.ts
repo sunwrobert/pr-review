@@ -12,7 +12,7 @@ import { buildAgentPrompt, isConflicted, isFailing, isTriageCandidate, needsAtte
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
-import { approvePull, closePull, commentOnPull, messageDevinSession, fetchViewerLogin, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchPull, fetchQueue, fetchStackNeighbors, type MergeState, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
+import { approvePull, dequeuePull, closePull, commentOnPull, messageDevinSession, fetchViewerLogin, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchPull, fetchQueue, fetchStackNeighbors, type MergeState, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
 import { GroupedReview } from './grouped-review';
 import { groupWithAi } from './file-grouping-ai';
 import type { FileGrouping, PromptFile } from './file-groups';
@@ -85,6 +85,7 @@ const dom = {
   bulkBar: element('bulk-bar'),
   bulkCount: element('bulk-count'),
   bulkFix: element<HTMLButtonElement>('bulk-fix'),
+  bulkDequeue: element<HTMLButtonElement>('bulk-dequeue'),
   bulkMerge: element<HTMLButtonElement>('bulk-merge'),
   bulkApprove: element<HTMLButtonElement>('bulk-approve'),
   bulkClose: element<HTMLButtonElement>('bulk-close'),
@@ -147,6 +148,8 @@ syncMergeLabel();
 
 function syncMergeLabel(pull?: PullRequest): void {
   const selectedCount = state.checkedIds.size;
+  dom.merge.classList.remove('dequeue');
+  if (selectedCount === 0 && pull?.queueEntry != null) return renderDequeueButton(pull.queueEntry);
   if (selectedCount === 0 && pull != null && stackMergeCount(pull) > 1) return syncStackMergeLabel(pull);
   const baseLabel = isSelectedQueued ? 'Merge when ready' : MERGE_LABELS[MERGE_METHOD];
   const label = selectedCount > 0 ? `${isSelectedQueued ? 'Queue' : 'Merge'} ${selectedCount} selected` : baseLabel;
@@ -1226,15 +1229,18 @@ function renderDetailMeta(pull: PullRequest): void {
     fixButton(pull),
     `<span class="status-summary" title="${escapeHtml(summary)}">${statusIcon(pull)}</span>`,
   ].join('');
-  dom.merge.disabled = pull.isDraft || pull.mergeable === 'CONFLICTING' || pull.queueEntry != null || leaving.has(pull.id);
+  dom.merge.disabled = pull.queueEntry == null && (pull.isDraft || pull.mergeable === 'CONFLICTING' || leaving.has(pull.id));
   dom.closePull.disabled = leaving.has(pull.id);
   const isOwn = isOwnPull(pull);
   dom.approve.disabled = isOwn;
   dom.approve.title = isOwn ? 'You can’t approve your own pull request' : 'Approve  A';
-  if (pull.queueEntry != null) {
-    dom.merge.innerHTML = `${MERGE_ICON}<span class="merge-count">${pull.queueEntry.position < 0 ? 'Queued' : `#${pull.queueEntry.position + 1}`}</span>`;
-    dom.merge.title = queuePosition(pull.queueEntry);
-  }
+  if (pull.queueEntry != null && state.checkedIds.size === 0) renderDequeueButton(pull.queueEntry);
+}
+
+function renderDequeueButton(entry: NonNullable<PullRequest['queueEntry']>): void {
+  dom.merge.classList.add('dequeue');
+  dom.merge.innerHTML = `${icon('x')}<span>Dequeue</span><span class="merge-count">${entry.position < 0 ? 'Queued' : `#${entry.position + 1}`}</span><kbd>⇧</kbd><kbd>Q</kbd>`;
+  dom.merge.title = `${queuePosition(entry)} · remove it from the queue  ⇧Q or ⌘↵`;
 }
 
 function syncQueueState(pull: PullRequest): void {
@@ -2055,6 +2061,7 @@ function renderBulkBar(): void {
   dom.bulkMerge.disabled = checked.every((pull) => pull.isDraft || pull.mergeable === 'CONFLICTING');
   dom.bulkFix.disabled = checked.every((pull) => leaving.has(pull.id) || fixingWithDevin.has(pull.id));
   dom.bulkApprove.disabled = checked.every(isOwnPull);
+  dom.bulkDequeue.hidden = !checked.some((pull) => pull.queueEntry != null);
   dom.bulkClose.disabled = checked.every((pull) => leaving.has(pull.id));
   dom.bulkApprove.title = dom.bulkApprove.disabled ? 'You can’t approve your own pull requests' : 'Approve selected  ⇧A';
 }
@@ -2266,7 +2273,16 @@ const QUEUE_CONFIRM_MS = 10 * 60_000;
 const PENDING_QUEUE_ENTRY = { position: -1, state: 'PENDING' } as const satisfies NonNullable<PullRequest['queueEntry']>;
 const optimisticQueued = new Map<string, number>();
 
+/** Dequeues are asynchronous too: a refresh right after one can still report the old entry, so hide it for a short while. */
+const DEQUEUE_CONFIRM_MS = 2 * 60_000;
+const optimisticDequeued = new Map<string, number>();
+
 function withOptimisticQueue(pull: PullRequest): PullRequest {
+  const dequeuedUntil = optimisticDequeued.get(pull.id);
+  if (dequeuedUntil != null) {
+    if (pull.queueEntry == null || Date.now() > dequeuedUntil) optimisticDequeued.delete(pull.id);
+    else return { ...pull, queueEntry: null };
+  }
   if (pull.queueEntry != null) {
     optimisticQueued.delete(pull.id);
     return pull;
@@ -2294,18 +2310,56 @@ function markQueued(pull: PullRequest): void {
   const ids = new Set(queuedTogether(pull).map((target) => target.id));
   const expiresAt = Date.now() + QUEUE_CONFIRM_MS;
   ids.forEach((id) => {
+    optimisticDequeued.delete(id);
     optimisticQueued.set(id, expiresAt);
     leaving.delete(id);
     window.clearTimeout(leaveTimers.get(id));
     leaveTimers.delete(id);
   });
+  reapplyQueueState(ids);
+}
+
+function reapplyQueueState(ids: ReadonlySet<string>): void {
   const apply = (pulls: PullRequest[]): PullRequest[] => pulls.map((candidate) => (ids.has(candidate.id) ? withOptimisticQueue(candidate) : candidate));
   state.pulls = apply(state.pulls);
   queueCache.forEach((pulls, kind) => queueCache.set(kind, apply(pulls)));
   invalidateList();
   renderList();
+  renderBulkBar();
   const selected = selectedPull();
-  if (selected != null && ids.has(selected.id)) renderDetailMeta(selected);
+  if (selected != null && ids.has(selected.id)) {
+    renderDetailMeta(selected);
+    syncMergeLabel(selected);
+  }
+}
+
+function markDequeued(pull: PullRequest): void {
+  optimisticQueued.delete(pull.id);
+  optimisticDequeued.set(pull.id, Date.now() + DEQUEUE_CONFIRM_MS);
+  reapplyQueueState(new Set([pull.id]));
+}
+
+/** Pulls ⇧Q acts on: the queued ones among the checked pulls, or the open pull when nothing is checked. */
+function dequeueTargets(): PullRequest[] {
+  const scope = state.checkedIds.size > 0 ? checkedPulls() : [selectedPull()].filter((pull): pull is PullRequest => pull != null);
+  return scope.filter((pull) => pull.queueEntry != null && !leaving.has(pull.id));
+}
+
+async function dequeueSelected(): Promise<void> {
+  const targets = dequeueTargets();
+  if (targets.length === 0) {
+    toast(state.checkedIds.size > 0 ? 'None of the selected PRs are in a merge queue' : 'This PR is not in a merge queue');
+    return;
+  }
+  const results = await Promise.allSettled(targets.map(async (pull) => {
+    await dequeuePull(pull);
+    markDequeued(pull);
+  }));
+  const failures = results.flatMap((result, index) => (result.status === 'rejected' ? [`#${targets[index]!.number}: ${errorMessage(result.reason).split('\n')[0]}`] : []));
+  const done = targets.length - failures.length;
+  const list = targets.length === 1 ? `#${targets[0]!.number}` : `${done} PR${done === 1 ? '' : 's'}`;
+  toast(failures.length === 0 ? `Removed ${list} from the merge queue` : `Removed ${done}, failed ${failures.length} — ${failures.join(' · ')}`, failures.length > 0);
+  void refresh(state.kind, true);
 }
 
 async function runMerge(pull: PullRequest, isQueued: boolean): Promise<string | null> {
@@ -2449,6 +2503,7 @@ function confirmMerge(pull: PullRequest, method: MergeMethod): Promise<boolean> 
 }
 
 async function mergeSelected(): Promise<void> {
+  if (selectedPull()?.queueEntry != null) return dequeueSelected();
   const pull = selectedPull();
   if (pull == null || dom.merge.disabled || leaving.has(pull.id)) return;
   const isQueued = await usesMergeQueue(pull, queueBase(pull));
@@ -3348,7 +3403,8 @@ const COMMANDS: Command[] = [
   { id: 'comment', section: 'Pull request', title: 'Write a comment', aliases: 'reply message mention devin note', keys: ['c'], run: openCommentDialog, isEnabled: hasPull },
   { id: 'approve', section: 'Pull request', title: 'Approve', aliases: 'lgtm review accept', keys: ['a'], run: () => void approveSelected(), isEnabled: () => { const pull = selectedPull(); return pull != null && !isOwnPull(pull); } },
   { id: 'close', section: 'Pull request', title: 'Close (all selected when several are checked)', aliases: 'close reject abandon discard decline won\'t merge', keys: ['⇧w'], run: openCloseDialog, isEnabled: () => closeTargets().length > 0 },
-  { id: 'merge', section: 'Pull request', title: 'Merge (all selected when several are checked)', aliases: 'squash ship land queue', keys: ['⌘↵', 'm'], run: () => void (state.checkedIds.size > 0 ? bulkMerge() : mergeSelected()), isEnabled: () => hasPull() || state.checkedIds.size > 0 },
+  { id: 'dequeue', section: 'Pull request', title: 'Remove from merge queue (all selected when several are checked)', aliases: 'unqueue dequeue cancel merge queue remove pull back', keys: ['⇧q'], run: () => void dequeueSelected(), isEnabled: () => dequeueTargets().length > 0 },
+  { id: 'merge', section: 'Pull request', title: 'Merge, or dequeue a queued PR (all selected when several are checked)', aliases: 'squash ship land queue', keys: ['⌘↵', 'm'], run: () => void (state.checkedIds.size > 0 ? bulkMerge() : mergeSelected()), isEnabled: () => hasPull() || state.checkedIds.size > 0 },
   { id: 'fix-prompt', section: 'Pull request', title: 'Needs attention → copy agent prompt', aliases: 'triage unapproved broken red failing ci conflict agent devin claude codex prompt clipboard review', keys: ['⇧x'], run: openTriage },
   { id: 'open', section: 'Pull request', title: 'Open on GitHub', aliases: 'browser link url web', keys: ['o', '⌘o', 'g o'], run: openSelectedOnGitHub, isEnabled: hasPull },
   { id: 'copy-links', section: 'Select', title: 'Copy selected PRs as linked titles, one per line', aliases: 'copy list links titles markdown share slack', keys: ['⌘c'], run: copyPullLinks, isEnabled: () => (state.checkedIds.size > 0 || hasPull()) && !hasTextSelection() },
@@ -3517,6 +3573,7 @@ element('bulk-ready').addEventListener('click', selectReady);
 element('bulk-unready').addEventListener('click', selectUnready);
 element('bulk-clear').addEventListener('click', clearChecked);
 dom.bulkFix.addEventListener('click', () => void bulkFixWithDevin());
+dom.bulkDequeue.addEventListener('click', () => void dequeueSelected());
 element('bulk-devin').addEventListener('click', () => void openDevinMessageDialog());
 element('bulk-triage').addEventListener('click', openTriage);
 element('bulk-all').addEventListener('click', selectAllVisible);

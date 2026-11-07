@@ -117,7 +117,17 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
       lateConflicts.add(Number(args.number));
       throw new Error('GraphQL: Pull Request is not mergeable (mergePullRequest)');
     }
+    if (args.queued === true) {
+      const queued = byNumber.get(Number(args.number));
+      if (queued != null) queued.mergeQueueEntry = { position: 0, state: 'AWAITING_CHECKS' };
+    }
     return 'ok';
+  },
+  dequeue: (args) => {
+    const queued = byId.get(String(args.pullId));
+    if (queued == null || queued.mergeQueueEntry == null) throw new Error('Pull request is not in a merge queue');
+    queued.mergeQueueEntry = null;
+    return 'dequeued';
   },
   open_in_browser: (args) => { (window as unknown as { __opened: string[] }).__opened = [...((window as unknown as { __opened?: string[] }).__opened ?? []), String(args.url)]; return undefined; },
 };

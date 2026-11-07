@@ -224,6 +224,10 @@ export function usesMergeQueue(pull: PullRequest, base = pull.baseRefName): Prom
   return pending;
 }
 
+export function dequeuePull(pull: PullRequest): Promise<string> {
+  return invoke<string>('dequeue', { pullId: pull.id });
+}
+
 export function mergePull(pull: PullRequest, method: MergeMethod, queued: boolean): Promise<string> {
   return invoke<string>('merge', { repo: pull.repository.nameWithOwner, number: pull.number, method, queued });
 }
