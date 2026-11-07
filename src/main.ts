@@ -689,7 +689,19 @@ function renderListEmpty(count: number, needle: string): void {
   box.hidden = kind === '';
 }
 
+/** A pasted list that matches nothing in a loaded view (pasted wrong, saved from an old session, or everything since merged) just hides every PR, so drop it. */
+function dropEmptyPastedOrder(): boolean {
+  if (pastedOrder == null || !lastFetchedAt.has(state.kind) || state.filter.trim() !== '') return false;
+  const numbers = new Set(pastedOrder.numbers);
+  if (listedPulls().some((pull) => numbers.has(pull.number))) return false;
+  const count = pastedOrder.numbers.length;
+  setPastedOrder(null);
+  toast(`None of the ${count} pasted PRs are in ${VIEW_TITLES[state.kind]}, so showing every PR`);
+  return true;
+}
+
 function renderList(): void {
+  if (dropEmptyPastedOrder()) return;
   const pulls = filteredPulls();
   const primaryRepo = mostCommonRepo();
   const sections = listSections(pulls);
@@ -1986,6 +1998,7 @@ function applyPastedText(text: string): boolean {
   }
   if (order.numbers.length < 2) return false;
   setPastedOrder(order);
+  if (pastedOrder == null) return true;
   const matched = state.pulls.filter((pull) => order.numbers.includes(pull.number)).length;
   const missing = order.numbers.length - matched;
   toast(`Showing and selected your list · ${matched} PR${matched === 1 ? '' : 's'}${missing > 0 ? ` · ${missing} not in this view (other view or closed)` : ''} · Esc to deselect, Esc again to show every PR`);
