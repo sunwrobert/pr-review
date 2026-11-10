@@ -771,11 +771,13 @@ button.primary, #pr-head .actions button { transition: background-color .12s lin
 
 #merge.merge-icon { gap: 6px; padding: 0 9px; }
 /* A queued PR's merge button turns into Dequeue: neutral, so it never reads as "merge". */
-#merge.merge-icon.dequeue { background: var(--bg-elev); border-color: var(--border); color: var(--text-2); }
+#merge.merge-icon.dequeue { background: var(--bg-elev); border-color: var(--border); color: var(--text-2); font-weight: 500; font-size: 12.5px; }
 #merge.merge-icon.dequeue:hover:not(:disabled) { background: var(--bg-hover); color: var(--text); }
-#merge.merge-icon.dequeue .merge-count { color: var(--wait); }
-#merge.merge-icon.dequeue kbd { background: var(--bg-hover); color: var(--text-3); }
+#merge.merge-icon.dequeue .dequeue-label { margin-right: 2px; }
 #merge.merge-icon kbd { background: rgb(255 255 255 / .16); border-color: transparent; color: rgb(255 255 255 / .9); }
+/* Dequeue is an outline button, so its keys use the normal kbd chip and ink, not the white-on-blue ones. */
+#merge.merge-icon.dequeue kbd { background: var(--bg-hover); border-color: var(--border); color: var(--text-3); }
+#merge.merge-icon.dequeue kbd[data-glyph] { --kbd-ink: var(--text-3); }
 #merge.merge-icon kbd:first-of-type { margin-left: 2px; }
 #pr-head .actions kbd, #pr-head .head-left kbd, .search kbd, .filter-bar .chip kbd, #bulk-bar kbd, #merge kbd {
   display: inline-grid; place-items: center; box-sizing: border-box; height: 16px; min-width: 16px; padding: 0 4px; margin: 0;

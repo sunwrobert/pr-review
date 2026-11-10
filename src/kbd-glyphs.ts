@@ -23,6 +23,12 @@ function normalize(kbd: HTMLElement): void {
   kbd.setAttribute('aria-label', text);
 }
 
+/** `<kbd>` markup that already carries its glyph, so a freshly rendered key never shows a raw-text frame before the observer catches it. */
+export function kbdHtml(text: string): string {
+  const glyph = SYMBOLS[text];
+  return glyph == null ? `<kbd>${text}</kbd>` : `<kbd data-glyph="${glyph}" aria-label="${text}">${text}</kbd>`;
+}
+
 export function normalizeKbdGlyphs(root: ParentNode = document): void {
   root.querySelectorAll<HTMLElement>('kbd').forEach(normalize);
 }

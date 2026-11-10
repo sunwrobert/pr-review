@@ -6,7 +6,7 @@ import { StableOrder } from './stable-order';
 import { forgetThreads, loadThreads, replyToThread, setThreadResolved, type ReviewThread } from './threads';
 import { findInDiff, findInDom, type FindHit } from './find-in-pr';
 import { applyPastedOrder, parsePastedOrder, parsePullReference, type PastedOrder } from './pasted-order';
-import { watchKbdGlyphs } from './kbd-glyphs';
+import { kbdHtml, watchKbdGlyphs } from './kbd-glyphs';
 import { animateDialogCancel, flash, glideScrollBy, glideScrollTo, setVisibleWithMotion } from './motion';
 import { buildAgentPrompt, isConflicted, isFailing, isTriageCandidate, needsAttention, prStatus, TRIAGE_META, TRIAGE_ORDER, triageReasons, type TriageReason } from './status';
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
@@ -141,20 +141,29 @@ let renderToken = 0;
 let toastTimer: number | undefined;
 
 const MERGE_ICON = icon('merge');
+const MERGE_KEYS = `${kbdHtml('⌘')}${kbdHtml('↵')}`;
 
 const MERGE_METHOD: MergeMethod = 'squash';
 syncMergeLabel();
 
 
+/** The merge button is redrawn on every select, refresh and queue lookup; touching the DOM only on a real change keeps it from flashing. */
+function setMergeButton(html: string, title: string, isDequeue = false): void {
+  if (dom.merge.dataset.html !== html) {
+    dom.merge.innerHTML = html;
+    dom.merge.dataset.html = html;
+  }
+  if (dom.merge.title !== title) dom.merge.title = title;
+  dom.merge.classList.toggle('dequeue', isDequeue);
+}
+
 function syncMergeLabel(pull?: PullRequest): void {
   const selectedCount = state.checkedIds.size;
-  dom.merge.classList.remove('dequeue');
   if (selectedCount === 0 && pull?.queueEntry != null) return renderDequeueButton(pull.queueEntry);
   if (selectedCount === 0 && pull != null && stackMergeCount(pull) > 1) return syncStackMergeLabel(pull);
   const baseLabel = isSelectedQueued ? 'Merge when ready' : MERGE_LABELS[MERGE_METHOD];
   const label = selectedCount > 0 ? `${isSelectedQueued ? 'Queue' : 'Merge'} ${selectedCount} selected` : baseLabel;
-  dom.merge.innerHTML = `${MERGE_ICON}${selectedCount > 0 ? `<span class="merge-count">${selectedCount}</span>` : ''}<kbd>⌘</kbd><kbd>↵</kbd>`;
-  dom.merge.title = `${label}  ⌘↵`;
+  setMergeButton(`${MERGE_ICON}${selectedCount > 0 ? `<span class="merge-count">${selectedCount}</span>` : ''}${MERGE_KEYS}`, `${label}  ⌘↵`);
 }
 
 type ToastTone = 'info' | 'success' | 'error';
@@ -1250,9 +1259,7 @@ function renderDetailMeta(pull: PullRequest): void {
 }
 
 function renderDequeueButton(entry: NonNullable<PullRequest['queueEntry']>): void {
-  dom.merge.classList.add('dequeue');
-  dom.merge.innerHTML = `${icon('x')}<span>Dequeue</span><span class="merge-count">${entry.position < 0 ? 'Queued' : `#${entry.position + 1}`}</span><kbd>⇧</kbd><kbd>Q</kbd>`;
-  dom.merge.title = `${queuePosition(entry)} · remove it from the queue  ⇧Q or ⌘↵`;
+  setMergeButton(`${icon('x')}<span class="dequeue-label">Dequeue</span>${kbdHtml('⇧')}${kbdHtml('Q')}`, `${queuePosition(entry)} · remove it from the queue  ⇧Q or ⌘↵`, true);
 }
 
 function syncQueueState(pull: PullRequest): void {
@@ -2419,10 +2426,9 @@ function syncStackMergeLabel(pull: PullRequest): void {
   const below = stackMergeCount(pull) - 1;
   const base = queueBase(pull);
   const isBlocked = isSelectedQueueKnown && !isSelectedQueued && isOnParentBranch(pull);
-  dom.merge.innerHTML = `${MERGE_ICON}<span class="merge-count">×${below + 1}</span><kbd>⌘</kbd><kbd>↵</kbd>`;
-  dom.merge.title = isBlocked
+  setMergeButton(`${MERGE_ICON}<span class="merge-count">×${below + 1}</span>${MERGE_KEYS}`, isBlocked
     ? `#${pull.number} is stacked on ${pull.baseRefName} and ${base} has no merge queue — merge the bottom of the stack first`
-    : `${isSelectedQueued ? 'Queue' : 'Merge'} #${pull.number} and the ${below} stacked below it into ${base}  ⌘↵`;
+    : `${isSelectedQueued ? 'Queue' : 'Merge'} #${pull.number} and the ${below} stacked below it into ${base}  ⌘↵`);
 }
 
 function topOfEachStack(pulls: PullRequest[]): PullRequest[] {
