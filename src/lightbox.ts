@@ -72,11 +72,16 @@ interface Size {
  * Scale for the lightbox: the whole image when that keeps at least `MIN_FIT_SCALE`, otherwise `MIN_FIT_SCALE` (scrolling the rest),
  * never wider than the box or larger than the image. `scrolls` is whether the result is taller than the box.
  */
-export function lightboxScale(natural: Size, box: Size): { scale: number; scrolls: boolean } {
+/** `whole` always fits the entire image on screen; `readable` stops shrinking at `MIN_FIT_SCALE` and scrolls the rest. */
+export type FitMode = 'whole' | 'readable';
+
+export const FIT_MODE_KEY = 'lightboxFit';
+
+export function lightboxScale(natural: Size, box: Size, mode: FitMode = 'readable'): { scale: number; scrolls: boolean } {
   if (natural.width <= 0 || natural.height <= 0 || box.width <= 0 || box.height <= 0) return { scale: 1, scrolls: false };
   const fitWidth = Math.min(box.width / natural.width, 1);
   const fitWhole = Math.min(fitWidth, box.height / natural.height);
-  const scale = Math.min(fitWidth, Math.max(fitWhole, MIN_FIT_SCALE));
+  const scale = mode === 'whole' ? fitWhole : Math.min(fitWidth, Math.max(fitWhole, MIN_FIT_SCALE));
   return { scale, scrolls: natural.height * scale > box.height + 1 };
 }
 
@@ -88,18 +93,23 @@ export class Lightbox {
   private items: MediaItem[] = [];
   private index = 0;
   private zoomed = false;
+  private fitMode: FitMode = localStorage.getItem(FIT_MODE_KEY) === 'whole' ? 'whole' : 'readable';
+  private readonly fitButton: HTMLButtonElement;
 
   constructor(private readonly openExternal: (url: string) => void) {
     this.dialog = document.createElement('dialog');
     this.dialog.id = 'lightbox';
     this.dialog.innerHTML = `
       <div class="lb-stage"></div>
-      <div class="lb-footer"><span class="lb-counter"></span><span class="lb-caption"></span><span class="lb-actions"><button class="lb-open" title="Open in browser  O">Open <kbd>O</kbd></button><button class="lb-close" title="Close  esc / Q">Close <kbd>esc</kbd></button></span></div>
+      <div class="lb-footer"><span class="lb-counter"></span><span class="lb-caption"></span><span class="lb-actions"><button class="lb-fit"></button><button class="lb-open" title="Open in browser  O">Open <kbd>O</kbd></button><button class="lb-close" title="Close  esc / Q">Close <kbd>esc</kbd></button></span></div>
       <button class="lb-nav lb-prev" title="Previous  ← / H">‹</button><button class="lb-nav lb-next" title="Next  → / L">›</button>`;
     document.body.append(this.dialog);
     this.stage = this.dialog.querySelector('.lb-stage') as HTMLElement;
     this.caption = this.dialog.querySelector('.lb-caption') as HTMLElement;
     this.counter = this.dialog.querySelector('.lb-counter') as HTMLElement;
+    this.fitButton = this.dialog.querySelector('.lb-fit') as HTMLButtonElement;
+    this.fitButton.addEventListener('click', () => this.toggleFitMode());
+    this.renderFitButton();
     this.dialog.querySelector('.lb-close')?.addEventListener('click', () => this.close());
     this.dialog.querySelector('.lb-open')?.addEventListener('click', () => this.openCurrent());
     this.dialog.querySelector('.lb-prev')?.addEventListener('click', () => this.step(-1));
@@ -122,9 +132,11 @@ export class Lightbox {
       width: this.stage.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight),
       height: this.stage.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom),
     };
-    const { scale, scrolls } = lightboxScale({ width: image.naturalWidth, height: image.naturalHeight }, box);
+    const { scale, scrolls } = lightboxScale({ width: image.naturalWidth, height: image.naturalHeight }, box, this.fitMode);
     this.stage.classList.toggle('fit-width', scrolls);
-    image.style.width = scrolls ? `${Math.round(image.naturalWidth * scale)}px` : '';
+    // An explicit size: percentage max-height does not resolve inside the grid stage, so CSS alone cannot fit a tall image.
+    image.style.width = `${Math.max(1, Math.round(image.naturalWidth * scale))}px`;
+    image.style.height = 'auto';
   }
 
   get isOpen(): boolean {
@@ -173,13 +185,38 @@ export class Lightbox {
     if (item != null) this.openExternal(item.url);
   }
 
+  /** Remembered across opens and restarts: some people want the whole screenshot, some want it readable. */
+  private toggleFitMode(): void {
+    this.fitMode = this.fitMode === 'whole' ? 'readable' : 'whole';
+    localStorage.setItem(FIT_MODE_KEY, this.fitMode);
+    this.renderFitButton();
+    this.zoomed = false;
+    this.stage.classList.remove('zoomed');
+    const image = this.stage.querySelector('img');
+    if (image != null) {
+      this.applyFit(image);
+      this.stage.scrollTop = 0;
+    }
+  }
+
+  private renderFitButton(): void {
+    const isWhole = this.fitMode === 'whole';
+    this.fitButton.innerHTML = `${isWhole ? 'Whole' : 'Readable'} <kbd>F</kbd>`;
+    this.fitButton.title = isWhole
+      ? 'Showing the whole image. Press F to keep tall images readable and scroll them instead'
+      : 'Tall images stay readable and scroll. Press F to always fit the whole image';
+    this.fitButton.setAttribute('aria-pressed', String(isWhole));
+  }
+
   private toggleZoom(): void {
     this.zoomed = !this.zoomed;
     this.stage.classList.toggle('zoomed', this.zoomed);
     const image = this.stage.querySelector('img');
     if (image == null) return;
-    if (this.zoomed) image.style.removeProperty('width');
-    else this.applyFit(image);
+    if (this.zoomed) {
+      image.style.removeProperty('width');
+      image.style.removeProperty('height');
+    } else this.applyFit(image);
   }
 
   private render(): void {
@@ -187,7 +224,9 @@ export class Lightbox {
     if (item == null) return;
     this.zoomed = false;
     this.stage.classList.remove('zoomed', 'fit-width');
-    this.stage.querySelector('img')?.style.removeProperty('width');
+    const previous = this.stage.querySelector('img');
+    previous?.style.removeProperty('width');
+    previous?.style.removeProperty('height');
     this.counter.textContent = `${this.index + 1} / ${this.items.length}`;
     this.caption.textContent = item.label;
     this.dialog.classList.toggle('single', this.items.length < 2);
@@ -251,6 +290,7 @@ export class Lightbox {
       Home: () => this.jump(0),
       End: () => this.jump(this.items.length - 1),
       o: () => this.openCurrent(),
+      f: () => this.toggleFitMode(),
       z: () => this.toggleZoom(),
       ' ': () => this.toggleZoom(),
       q: () => this.close(),
