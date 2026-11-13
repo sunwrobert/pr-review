@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 use tokio::process::Command;
 
+/// Everything a list row needs. Used where a handful of PRs are fetched by number or branch.
 const QUEUE_FIELDS: &str = r#"
 ... on PullRequest {
   id number title url isDraft
@@ -16,12 +17,33 @@ const QUEUE_FIELDS: &str = r#"
   stack { baseRefName entries(first: 100) { nodes { position pullRequest { state } } } }
 }"#;
 
+/// What `search` returns cheaply (~1.2 s per 100). Diff size, review decision, checks, queue and stack are what make a
+/// search page take 8-14 s and 502 on big queues, so those come from `QUEUE_DETAIL_FIELDS` in parallel `nodes` batches.
+const QUEUE_SEARCH_FIELDS: &str = r#"
+... on PullRequest {
+  id number title url isDraft
+  createdAt updatedAt headRefName baseRefName
+  author { login avatarUrl }
+  repository { nameWithOwner }
+}"#;
+
+const QUEUE_DETAIL_FIELDS: &str = r#"
+... on PullRequest {
+  id additions deletions changedFiles reviewDecision
+  mergeQueueEntry { position state }
+  commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+  stackEntry { position }
+  stack { baseRefName entries(first: 100) { nodes { position pullRequest { state } } } }
+}"#;
+
+/// PRs per detail request: ~2 s for 25 at full fields; 50 occasionally hits the same gateway timeout as search.
+const QUEUE_DETAIL_BATCH: usize = 25;
+
 const MAX_MERGE_STATE_IDS: usize = 25;
 /// 100 is GitHub's max for search; it adds only ~1 s per page versus 50 and halves page count for large queues.
 const QUEUE_PAGE_SIZE: usize = 100;
 
 const MAX_DIFF_FALLBACK_FILES: usize = 3000;
-const GH_TIMEOUT_SECS: u64 = 45;
 const SYSTEM_ONE_URL: &str = "https://openrouter.ai/api/v1/systemone";
 const CHAT_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_GROUPING_REQUEST_BYTES: usize = 400_000;
@@ -29,7 +51,7 @@ const MAX_READINESS_STATE_BYTES: usize = 600_000;
 
 static OPENROUTER_KEY: OnceLock<Option<String>> = OnceLock::new();
 
-#[derive(Deserialize, Clone, Copy)]
+#[derive(Deserialize, Clone, Copy, Debug)]
 #[serde(rename_all = "lowercase")]
 enum QueueKind {
     Review,
@@ -60,71 +82,163 @@ fn gh_binary() -> &'static str {
         .unwrap_or("gh")
 }
 
-const GH_MAX_CONCURRENT: usize = 6;
+const GH_MAX_CONCURRENT: usize = 12;
 const GH_RETRY_DELAYS_MS: [u64; 3] = [400, 1_200, 3_000];
+const GITHUB_API: &str = "https://api.github.com";
+const GITHUB_TIMEOUT_SECS: u64 = 40;
 
-static GH_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(GH_MAX_CONCURRENT);
+/// gh's token, read once. Calling GitHub directly over one pooled HTTP/2 connection skips the ~440 ms `gh` process start
+/// on every request; `gh` itself stays for the few porcelain commands (approve, close) and as the token source.
+static GITHUB_TOKEN: tokio::sync::Mutex<Option<String>> = tokio::sync::Mutex::const_new(None);
 
-/** Failures that happen before the request leaves the machine, so retrying can never repeat a mutation. */
-/// GitHub's gateway gave up on the request (it often succeeds on the next try). Only safe to retry for reads.
-fn is_gateway_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    ["http 502", "http 503", "http 504", "502 bad gateway", "503 service unavailable", "504 gateway time"]
-        .iter()
-        .any(|needle| lower.contains(needle))
-}
-
-/// `gh api graphql` with a query (not a mutation), or a plain `gh api` GET: safe to repeat.
-fn is_read_request(args: &[&str]) -> bool {
-    if args.first() != Some(&"api") || args.iter().any(|arg| matches!(*arg, "-X" | "--method")) {
-        return false;
+async fn github_token() -> Result<String, String> {
+    let mut cached = GITHUB_TOKEN.lock().await;
+    if let Some(token) = cached.as_ref() {
+        return Ok(token.clone());
     }
-    !args.iter().any(|arg| arg.starts_with("query=mutation") || arg.starts_with("query=mutation("))
+    let output = Command::new(gh_binary())
+        .args(["auth", "token"])
+        .env("GH_PROMPT_DISABLED", "1")
+        .output()
+        .await
+        .map_err(|error| format!("could not run gh: {error}"))?;
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() || token.is_empty() || token.contains(char::is_whitespace) {
+        return Err("GitHub sign-in missing; run `gh auth login`".to_string());
+    }
+    *cached = Some(token.clone());
+    Ok(token)
 }
 
-fn is_retryable_network_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    ["tls handshake timeout", "dial tcp", "connection refused", "no such host", "network is unreachable", "temporary failure in name resolution"]
-        .iter()
-        .any(|needle| lower.contains(needle))
+async fn forget_github_token() {
+    *GITHUB_TOKEN.lock().await = None;
 }
 
-async fn gh(args: &[&str]) -> Result<String, String> {
+fn github_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(GITHUB_TIMEOUT_SECS))
+            .user_agent(concat!("pr-review/", env!("CARGO_PKG_VERSION")))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .expect("github client")
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Method {
+    Get,
+    Post,
+    Put,
+    Patch,
+}
+
+/// One GitHub API call with gh's token. Reads retry gateway timeouts and dropped connections; writes never retry.
+async fn github(method: Method, path: &str, body: Option<serde_json::Value>, accept: Option<&str>) -> Result<String, String> {
+    let is_read = method == Method::Get || body.as_ref().is_some_and(|value| value["query"].as_str().is_some_and(|query| !query.trim_start().starts_with("mutation")));
     let mut attempt = 0;
+    let mut refreshed_token = false;
     loop {
         let result = {
             let _slot = GH_SLOTS.acquire().await.map_err(|error| error.to_string())?;
-            gh_once(args).await
+            github_once(method, path, body.as_ref(), accept).await
         };
         match result {
-            Err(message) if attempt < GH_RETRY_DELAYS_MS.len() && (is_retryable_network_error(&message) || (is_gateway_error(&message) && is_read_request(args))) => {
+            Err(GithubError::Unauthorized) if !refreshed_token => {
+                forget_github_token().await;
+                refreshed_token = true;
+            }
+            Err(GithubError::Retryable(message)) if is_read && attempt < GH_RETRY_DELAYS_MS.len() => {
+                eprintln!("[github] {path} -> {message}, retrying");
                 tokio::time::sleep(std::time::Duration::from_millis(GH_RETRY_DELAYS_MS[attempt])).await;
                 attempt += 1;
             }
-            other => return other,
+            Err(error) => return Err(error.into_message()),
+            Ok(text) => return Ok(text),
         }
     }
 }
 
-async fn gh_once(args: &[&str]) -> Result<String, String> {
-    let child = Command::new(gh_binary())
-        .args(args)
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("NO_COLOR", "1")
-        .kill_on_drop(true)
-        .output();
-    let output = tokio::time::timeout(std::time::Duration::from_secs(GH_TIMEOUT_SECS), child)
-        .await
-        .map_err(|_| format!("gh timed out after {GH_TIMEOUT_SECS}s"))?
-        .map_err(|error| format!("could not run gh: {error}"))?;
-    if output.status.success() {
-        return String::from_utf8(output.stdout).map_err(|error| error.to_string());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let message = if stderr.is_empty() { format!("gh exited with {}", output.status) } else { stderr };
-    eprintln!("[gh] {} -> {}", args.iter().take(3).cloned().collect::<Vec<_>>().join(" "), message.lines().next().unwrap_or(""));
-    Err(message)
+enum GithubError {
+    Unauthorized,
+    Retryable(String),
+    Fatal(String),
 }
+
+impl GithubError {
+    fn into_message(self) -> String {
+        match self {
+            GithubError::Unauthorized => "GitHub sign-in expired; run `gh auth login`".to_string(),
+            GithubError::Retryable(message) | GithubError::Fatal(message) => message,
+        }
+    }
+}
+
+async fn github_once(method: Method, path: &str, body: Option<&serde_json::Value>, accept: Option<&str>) -> Result<String, GithubError> {
+    let token = github_token().await.map_err(GithubError::Fatal)?;
+    let url = format!("{GITHUB_API}/{}", path.trim_start_matches('/'));
+    let builder = match method {
+        Method::Get => github_client().get(&url),
+        Method::Post => github_client().post(&url),
+        Method::Put => github_client().put(&url),
+        Method::Patch => github_client().patch(&url),
+    };
+    let mut request = builder
+        .bearer_auth(token)
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("Accept", accept.unwrap_or("application/vnd.github+json"));
+    if let Some(body) = body {
+        request = request.header("Content-Type", "application/json").body(body.to_string());
+    }
+    let response = request.send().await.map_err(|error| {
+        let is_transient = error.is_timeout() || error.is_connect() || error.is_request();
+        let message = error.without_url().to_string();
+        if is_transient { GithubError::Retryable(message) } else { GithubError::Fatal(message) }
+    })?;
+    let status = response.status();
+    let text = response.text().await.map_err(|error| GithubError::Retryable(error.without_url().to_string()))?;
+    if status.is_success() {
+        return graphql_errors_only(&text).map_or(Ok(text), |message| Err(classify_graphql_error(message)));
+    }
+    let detail = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|value| value["message"].as_str().map(str::to_string))
+        .unwrap_or_else(|| text.chars().take(200).collect());
+    match status.as_u16() {
+        401 => Err(GithubError::Unauthorized),
+        502..=504 => Err(GithubError::Retryable(format!("HTTP {status}: {detail}"))),
+        _ => Err(GithubError::Fatal(format!("HTTP {status}: {detail}"))),
+    }
+}
+
+/// GraphQL reports failures in a 200 body. A response with no data at all is an error; partial data is returned as is.
+fn graphql_errors_only(text: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let message = value["errors"][0]["message"].as_str()?;
+    value["data"].is_null().then(|| message.to_string())
+}
+
+fn classify_graphql_error(message: String) -> GithubError {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("timeout") || lower.contains("something went wrong") || lower.contains("try again") {
+        GithubError::Retryable(message)
+    } else {
+        GithubError::Fatal(message)
+    }
+}
+
+/// Mutations go through the same client; `github` sees the leading `mutation` and never retries them.
+async fn graphql_mutation(query: &str, variables: serde_json::Value) -> Result<String, String> {
+    debug_assert!(query.trim_start().starts_with("mutation"));
+    graphql(query, variables).await
+}
+
+async fn graphql(query: &str, variables: serde_json::Value) -> Result<String, String> {
+    github(Method::Post, "graphql", Some(serde_json::json!({ "query": query, "variables": variables })), None).await
+}
+
+static GH_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(GH_MAX_CONCURRENT);
 
 fn is_safe_segment(segment: &str) -> bool {
     !segment.is_empty()
@@ -150,10 +264,64 @@ fn search_query(kind: QueueKind) -> &'static str {
 
 #[tauri::command]
 async fn queue(kind: QueueKind) -> Result<String, String> {
-    let query = format!(
-        "query($q: String!, $endCursor: String) {{ search(query: $q, type: ISSUE, first: {QUEUE_PAGE_SIZE}, after: $endCursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {QUEUE_FIELDS} }} }} }}"
+    let search = format!(
+        "query($q: String!, $cursor: String) {{ search(query: $q, type: ISSUE, first: {QUEUE_PAGE_SIZE}, after: $cursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {QUEUE_SEARCH_FIELDS} }} }} }}"
     );
-    gh(&["api", "graphql", "--paginate", "--slurp", "-f", &format!("query={query}"), "-f", &format!("q={}", search_query(kind))]).await
+    let detail = format!("query($ids: [ID!]!) {{ nodes(ids: $ids) {{ {QUEUE_DETAIL_FIELDS} }} }}");
+    let mut nodes: Vec<serde_json::Value> = Vec::new();
+    let mut details = tokio::task::JoinSet::new();
+    let mut cursor: Option<String> = None;
+    // Detail batches start as soon as each search page lands, so they overlap the remaining pages.
+    loop {
+        let page: serde_json::Value = serde_json::from_str(&graphql(&search, serde_json::json!({ "q": search_query(kind), "cursor": cursor })).await?)
+            .map_err(|error| format!("invalid search response: {error}"))?;
+        let result = &page["data"]["search"];
+        let page_nodes: Vec<serde_json::Value> = result["nodes"].as_array().cloned().unwrap_or_default().into_iter().filter(|node| node["id"].is_string()).collect();
+        let ids: Vec<String> = page_nodes.iter().filter_map(|node| node["id"].as_str().map(str::to_string)).collect();
+        for batch in ids.chunks(QUEUE_DETAIL_BATCH) {
+            let (query, ids) = (detail.clone(), batch.to_vec());
+            details.spawn(async move { graphql(&query, serde_json::json!({ "ids": ids })).await });
+        }
+        nodes.extend(page_nodes);
+        cursor = result["pageInfo"]["endCursor"].as_str().map(str::to_string);
+        if result["pageInfo"]["hasNextPage"].as_bool() != Some(true) || cursor.is_none() {
+            break;
+        }
+    }
+    let mut by_id: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    let mut failures = 0;
+    while let Some(joined) = details.join_next().await {
+        let Ok(Ok(text)) = joined else {
+            failures += 1;
+            continue;
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        for node in parsed["data"]["nodes"].as_array().into_iter().flatten() {
+            if let Some(id) = node["id"].as_str() {
+                by_id.insert(id.to_string(), node.clone());
+            }
+        }
+    }
+    if failures > 0 {
+        eprintln!("[github] queue: {failures} detail batch(es) failed after retries; those rows show without checks or size");
+    }
+    let merged: Vec<serde_json::Value> = nodes
+        .into_iter()
+        .map(|mut node| {
+            let extra = node_detail(&by_id, &node);
+            if let (Some(target), Some(extra)) = (node.as_object_mut(), extra) {
+                for (key, value) in extra {
+                    target.insert(key, value);
+                }
+            }
+            node
+        })
+        .collect();
+    Ok(serde_json::json!([{ "data": { "search": { "nodes": merged } } }]).to_string())
+}
+
+fn node_detail(by_id: &std::collections::HashMap<String, serde_json::Value>, node: &serde_json::Value) -> Option<serde_json::Map<String, serde_json::Value>> {
+    by_id.get(node["id"].as_str()?)?.as_object().cloned()
 }
 
 fn is_node_id(id: &str) -> bool {
@@ -170,7 +338,7 @@ async fn merge_states(ids: Vec<String>) -> Result<String, String> {
         "p{index}: node(id: \"{id}\") {{ ... on PullRequest {{ id mergeable mergeStateStatus reviewThreads(first: 100) {{ nodes {{ isResolved isOutdated }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100) {{ nodes {{ __typename ... on CheckRun {{ name conclusion isRequired(pullRequestId: \"{id}\") }} ... on StatusContext {{ context state isRequired(pullRequestId: \"{id}\") }} }} }} }} }} }} }} }} }}"
     )).collect();
     let query = format!("query {{ {} }}", fields.join(" "));
-    gh(&["api", "graphql", "-f", &format!("query={query}")]).await
+    graphql(&query, serde_json::json!({})).await
 }
 
 fn is_safe_branch(branch: &str) -> bool {
@@ -182,7 +350,7 @@ async fn pull(repo: String, number: u64) -> Result<String, String> {
     validate_repo(&repo)?;
     let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
     let query = format!("query($owner: String!, $name: String!, $number: Int!) {{ repository(owner: $owner, name: $name) {{ pullRequest(number: $number) {{ state {QUEUE_FIELDS} stack {{ baseRefName entries(first: 100) {{ nodes {{ position pullRequest {{ state {QUEUE_FIELDS} }} }} }} }} }} }} }}");
-    gh(&["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("owner={owner}"), "-f", &format!("name={name}"), "-F", &format!("number={number}")]).await
+    graphql(&query, serde_json::json!({ "owner": owner, "name": name, "number": number })).await
 }
 
 /// Open pulls stacked directly on `head` (above) and the open pull whose head is `base` (below).
@@ -194,7 +362,7 @@ async fn stack_neighbors(repo: String, head: String, base: String) -> Result<Str
     }
     let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
     let query = format!("query($owner: String!, $name: String!, $head: String!, $base: String!) {{ repository(owner: $owner, name: $name) {{ above: pullRequests(baseRefName: $head, states: OPEN, first: 20) {{ nodes {{ {QUEUE_FIELDS} }} }} below: pullRequests(headRefName: $base, states: OPEN, first: 5) {{ nodes {{ {QUEUE_FIELDS} }} }} }} }}");
-    gh(&["api", "graphql", "-f", &format!("query={query}"), "-f", &format!("owner={owner}"), "-f", &format!("name={name}"), "-f", &format!("head={head}"), "-f", &format!("base={base}")]).await
+    graphql(&query, serde_json::json!({ "owner": owner, "name": name, "head": head, "base": base })).await
 }
 
 #[tauri::command]
@@ -202,14 +370,7 @@ async fn threads(repo: String, number: u64) -> Result<String, String> {
     validate_repo(&repo)?;
     let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
     let query = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { id isResolved isOutdated path line originalLine diffSide viewerCanResolve comments(first: 30) { totalCount nodes { id bodyHTML createdAt url author { login avatarUrl __typename } } } } } } } }";
-    gh(&[
-        "api", "graphql",
-        "-f", &format!("query={query}"),
-        "-F", &format!("owner={owner}"),
-        "-F", &format!("name={name}"),
-        "-F", &format!("number={number}"),
-    ])
-    .await
+    graphql(query, serde_json::json!({ "owner": owner, "name": name, "number": number })).await
 }
 
 /// Takes a pull out of its merge queue. GitHub has no REST endpoint for this, only the GraphQL mutation.
@@ -219,7 +380,7 @@ async fn dequeue(pull_id: String) -> Result<String, String> {
         return Err("invalid pull request id".to_string());
     }
     let query = "mutation($id: ID!) { dequeuePullRequest(input: { id: $id }) { mergeQueueEntry { id } } }";
-    let output = gh(&["api", "graphql", "-f", &format!("query={query}"), "-F", &format!("id={pull_id}")]).await?;
+    let output = graphql(query, serde_json::json!({ "id": pull_id })).await?;
     let parsed: serde_json::Value = serde_json::from_str(&output).map_err(|error| error.to_string())?;
     if let Some(message) = parsed["errors"][0]["message"].as_str() {
         return Err(message.to_string());
@@ -234,7 +395,7 @@ async fn set_thread_resolved(thread_id: String, resolved: bool) -> Result<String
     }
     let mutation = if resolved { "resolveReviewThread" } else { "unresolveReviewThread" };
     let query = format!("mutation($id: ID!) {{ {mutation}(input: {{ threadId: $id }}) {{ thread {{ id isResolved }} }} }}");
-    gh(&["api", "graphql", "-f", &format!("query={query}"), "-F", &format!("id={thread_id}")]).await
+    graphql_mutation(&query, serde_json::json!({ "id": thread_id })).await
 }
 
 #[tauri::command]
@@ -246,7 +407,7 @@ async fn reply_to_thread(thread_id: String, body: String) -> Result<String, Stri
         return Err("reply must be between 1 and 65000 bytes".to_string());
     }
     let query = "mutation($id: ID!, $body: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $id, body: $body }) { comment { id } } }";
-    gh(&["api", "graphql", "-f", &format!("query={query}"), "-F", &format!("id={thread_id}"), "-f", &format!("body={body}")]).await
+    graphql_mutation(query, serde_json::json!({ "id": thread_id, "body": body })).await
 }
 
 #[tauri::command]
@@ -254,14 +415,7 @@ async fn conversation(repo: String, number: u64) -> Result<String, String> {
     validate_repo(&repo)?;
     let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
     let query = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { comments(last: 50) { totalCount nodes { id bodyHTML createdAt url author { login avatarUrl __typename } } } reviews(last: 30) { totalCount nodes { id state bodyHTML submittedAt url author { login avatarUrl __typename } comments { totalCount } } } } } }";
-    gh(&[
-        "api", "graphql",
-        "-f", &format!("query={query}"),
-        "-F", &format!("owner={owner}"),
-        "-F", &format!("name={name}"),
-        "-F", &format!("number={number}"),
-    ])
-    .await
+    graphql(query, serde_json::json!({ "owner": owner, "name": name, "number": number })).await
 }
 
 #[tauri::command]
@@ -269,22 +423,16 @@ async fn body(repo: String, number: u64) -> Result<String, String> {
     validate_repo(&repo)?;
     let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
     let query = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { bodyHTML } } }";
-    gh(&[
-        "api", "graphql",
-        "-f", &format!("query={query}"),
-        "-F", &format!("owner={owner}"),
-        "-F", &format!("name={name}"),
-        "-F", &format!("number={number}"),
-        "--jq", ".data.repository.pullRequest.bodyHTML",
-    ])
-    .await
+    let output = graphql(query, serde_json::json!({ "owner": owner, "name": name, "number": number })).await?;
+    let parsed: serde_json::Value = serde_json::from_str(&output).map_err(|error| error.to_string())?;
+    Ok(parsed["data"]["repository"]["pullRequest"]["bodyHTML"].as_str().unwrap_or("").to_string())
 }
 
 #[tauri::command]
 async fn diff(repo: String, number: u64) -> Result<String, String> {
     validate_repo(&repo)?;
     let path = format!("repos/{repo}/pulls/{number}");
-    match gh(&["api", &path, "-H", "Accept: application/vnd.github.v3.diff"]).await {
+    match github(Method::Get, &path, None, Some("application/vnd.github.v3.diff")).await {
         Ok(patch) => Ok(patch),
         Err(error) if error.contains("too_large") || error.contains("406") || error.contains("exceeded") => {
             diff_from_files(&repo, number).await
@@ -294,12 +442,19 @@ async fn diff(repo: String, number: u64) -> Result<String, String> {
 }
 
 async fn diff_from_files(repo: &str, number: u64) -> Result<String, String> {
-    let path = format!("repos/{repo}/pulls/{number}/files?per_page=100");
-    let raw = gh(&["api", "--paginate", "--slurp", &path]).await?;
-    let pages: Vec<Vec<PullFile>> = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
-    let patch = pages
+    let mut files: Vec<PullFile> = Vec::new();
+    // GitHub lists at most 3000 files, 100 per page.
+    for page in 1..=30 {
+        let raw = github(Method::Get, &format!("repos/{repo}/pulls/{number}/files?per_page=100&page={page}"), None, None).await?;
+        let batch: Vec<PullFile> = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+        let is_last = batch.len() < 100;
+        files.extend(batch);
+        if is_last {
+            break;
+        }
+    }
+    let patch = files
         .into_iter()
-        .flatten()
         .take(MAX_DIFF_FALLBACK_FILES)
         .map(|file| file_patch(&file))
         .collect::<Vec<_>>()
@@ -327,7 +482,7 @@ fn file_patch(file: &PullFile) -> String {
 #[tauri::command]
 async fn approve(repo: String, number: u64) -> Result<String, String> {
     validate_repo(&repo)?;
-    gh(&["pr", "review", &number.to_string(), "-R", &repo, "--approve"]).await
+    github(Method::Post, &format!("repos/{repo}/pulls/{number}/reviews"), Some(serde_json::json!({ "event": "APPROVE" })), None).await.map(|_| "approved".to_string())
 }
 
 const MAX_COMMENT_BYTES: usize = 65_000;
@@ -335,16 +490,15 @@ const MAX_COMMENT_BYTES: usize = 65_000;
 #[tauri::command]
 async fn close(repo: String, number: u64, comment: Option<String>) -> Result<String, String> {
     validate_repo(&repo)?;
-    let number = number.to_string();
     let comment = comment.filter(|body| !body.trim().is_empty());
     if comment.as_ref().is_some_and(|body| body.len() > MAX_COMMENT_BYTES) {
         return Err("comment must be at most 65000 bytes".to_string());
     }
-    let mut args = vec!["pr", "close", number.as_str(), "-R", repo.as_str()];
-    if let Some(body) = comment.as_deref() {
-        args.extend(["--comment", body]);
+    // Same order as `gh pr close --comment`: the comment first, so it lands on the PR even if closing then fails.
+    if let Some(body) = comment {
+        github(Method::Post, &format!("repos/{repo}/issues/{number}/comments"), Some(serde_json::json!({ "body": body })), None).await?;
     }
-    gh(&args).await
+    github(Method::Patch, &format!("repos/{repo}/pulls/{number}"), Some(serde_json::json!({ "state": "closed" })), None).await.map(|_| "closed".to_string())
 }
 
 #[tauri::command]
@@ -354,7 +508,9 @@ async fn comment(repo: String, number: u64, body: String) -> Result<String, Stri
         return Err("comment must be between 1 and 65000 bytes".to_string());
     }
     let path = format!("repos/{repo}/issues/{number}/comments");
-    gh(&["api", &path, "-X", "POST", "-f", &format!("body={body}"), "--jq", ".html_url"]).await.map(|url| url.trim().to_string())
+    let output = github(Method::Post, &path, Some(serde_json::json!({ "body": body })), None).await?;
+    let parsed: serde_json::Value = serde_json::from_str(&output).map_err(|error| error.to_string())?;
+    Ok(parsed["html_url"].as_str().unwrap_or("").to_string())
 }
 
 fn devin_binary() -> String {
@@ -583,7 +739,9 @@ async fn message_devin(session_id: String, message: String) -> Result<String, St
 
 #[tauri::command]
 async fn viewer() -> Result<String, String> {
-    gh(&["api", "user", "--jq", ".login"]).await.map(|login| login.trim().to_string())
+    let output = github(Method::Get, "user", None, None).await?;
+    let parsed: serde_json::Value = serde_json::from_str(&output).map_err(|error| error.to_string())?;
+    Ok(parsed["login"].as_str().unwrap_or("").to_string())
 }
 
 #[tauri::command]
@@ -594,14 +752,7 @@ async fn merge_queue(repo: String, base: String) -> Result<String, String> {
     }
     let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
     let query = "query($owner: String!, $name: String!, $branch: String!) { repository(owner: $owner, name: $name) { mergeQueue(branch: $branch) { url configuration { mergeMethod } } } }";
-    gh(&[
-        "api", "graphql",
-        "-f", &format!("query={query}"),
-        "-F", &format!("owner={owner}"),
-        "-F", &format!("name={name}"),
-        "-f", &format!("branch={base}"),
-    ])
-    .await
+    graphql(query, serde_json::json!({ "owner": owner, "name": name, "branch": base })).await
 }
 
 #[tauri::command]
@@ -610,17 +761,12 @@ async fn merge(repo: String, number: u64, method: MergeMethod, queued: bool) -> 
     // The async endpoint is the only one GitHub accepts for stacked pulls; it lands every open pull below this one into the stack's base.
     let path = format!("repos/{repo}/pulls/{number}/merge-async");
     let method = match method {
-        MergeMethod::Squash => "merge_method=squash",
-        MergeMethod::Merge => "merge_method=merge",
-        MergeMethod::Rebase => "merge_method=rebase",
+        MergeMethod::Squash => "squash",
+        MergeMethod::Merge => "merge",
+        MergeMethod::Rebase => "rebase",
     };
-    let mut args = vec!["api", "-X", "PUT", path.as_str(), "-f"];
-    if queued {
-        args.push("merge_action=merge_queue");
-    } else {
-        args.extend(["merge_action=default", "-f", method]);
-    }
-    let output = gh(&args).await?;
+    let payload = if queued { serde_json::json!({ "merge_action": "merge_queue" }) } else { serde_json::json!({ "merge_action": "default", "merge_method": method }) };
+    let output = github(Method::Put, &path, Some(payload), None).await?;
     let parsed: serde_json::Value = serde_json::from_str(&output).map_err(|error| error.to_string())?;
     match parsed["status"].as_str() {
         Some("failed") => Err(parsed["details"]["message"].as_str().unwrap_or("Merge failed").to_string()),
@@ -655,14 +801,7 @@ async fn review_context(repo: String, number: u64) -> Result<String, String> {
     validate_repo(&repo)?;
     let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
     let query = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { body files(first: 100) { totalCount nodes { path additions deletions } } reviews(last: 20) { nodes { state bodyText submittedAt author { login __typename } } } comments(last: 25) { nodes { bodyText createdAt author { login __typename } } } reviewThreads(last: 100) { nodes { isResolved isOutdated } } } } }";
-    gh(&[
-        "api", "graphql",
-        "-f", &format!("query={query}"),
-        "-F", &format!("owner={owner}"),
-        "-F", &format!("name={name}"),
-        "-F", &format!("number={number}"),
-    ])
-    .await
+    graphql(query, serde_json::json!({ "owner": owner, "name": name, "number": number })).await
 }
 
 #[tauri::command]
@@ -766,27 +905,43 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_devin_org_id, is_gateway_error, is_read_request, is_retryable_network_error, parse_devin_credentials, DevinCredentials};
+    use super::{classify_graphql_error, extract_devin_org_id, graphql_errors_only, parse_devin_credentials, DevinCredentials, GithubError};
 
-    #[test]
-    fn retries_only_failures_before_the_request_is_sent() {
-        assert!(is_retryable_network_error("Post \"https://api.github.com/graphql\": net/http: TLS handshake timeout"));
-        assert!(is_retryable_network_error("dial tcp: lookup api.github.com: no such host"));
-        assert!(!is_retryable_network_error("HTTP 502: Bad Gateway"));
-        assert!(!is_retryable_network_error("read tcp 10.0.0.2:5000->140.82.112.6:443: read: connection reset by peer"));
-        assert!(!is_retryable_network_error("GraphQL: Pull request is not mergeable"));
+    /// Talks to the real GitHub API with gh's token: `cargo test -- --ignored live_github --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_github_queue_and_pull_loads() {
+        use super::{body, conversation, diff, queue, viewer, QueueKind};
+        let started = std::time::Instant::now();
+        let login = viewer().await.expect("viewer");
+        println!("viewer {login} in {} ms", started.elapsed().as_millis());
+        for kind in [QueueKind::Mine, QueueKind::Review, QueueKind::Involved] {
+            let started = std::time::Instant::now();
+            let raw = queue(kind).await.expect("queue");
+            let pages: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let nodes = pages[0]["data"]["search"]["nodes"].as_array().unwrap();
+            let with_detail = nodes.iter().filter(|node| node["reviewDecision"] != serde_json::Value::Null || node["commits"].is_object()).count();
+            let missing_checks = nodes.iter().filter(|node| !node["commits"].is_object()).count();
+            println!("queue {:?}: {} PRs, {} with details, {} missing details, {} ms", kind as u8, nodes.len(), with_detail, missing_checks, started.elapsed().as_millis());
+            println!("  queue payload {} KB", raw.len() / 1024);
+            assert_eq!(missing_checks, 0, "every PR gets its detail fields");
+            if let Some(first) = nodes.first() {
+                let repo = first["repository"]["nameWithOwner"].as_str().unwrap().to_string();
+                let number = first["number"].as_u64().unwrap();
+                let started = std::time::Instant::now();
+                let (b, d, c) = tokio::join!(body(repo.clone(), number), diff(repo.clone(), number), conversation(repo.clone(), number));
+                println!("  {repo}#{number}: body {} B, diff {} B, conversation ok={} in {} ms (parallel)", b.expect("body").len(), d.expect("diff").len(), c.is_ok(), started.elapsed().as_millis());
+            }
+        }
     }
 
     #[test]
-    fn retries_gateway_errors_only_for_reads() {
-        assert!(is_gateway_error("gh: HTTP 502: Bad Gateway (https://api.github.com/graphql)"));
-        assert!(is_gateway_error("<html><head><title>502 Bad Gateway</title></head>"));
-        assert!(!is_gateway_error("HTTP 404: Not Found"));
-        assert!(is_read_request(&["api", "graphql", "--paginate", "-f", "query=query($q: String!) { search }"]));
-        assert!(is_read_request(&["api", "repos/o/r/pulls/1/files"]));
-        assert!(!is_read_request(&["api", "graphql", "-f", "query=mutation($id: ID!) { enqueuePullRequest }"]));
-        assert!(!is_read_request(&["api", "repos/o/r/issues/1/comments", "-X", "POST"]));
-        assert!(!is_read_request(&["pr", "merge", "1", "-R", "o/r", "--squash"]));
+    fn graphql_errors_fail_only_when_there_is_no_data() {
+        assert_eq!(graphql_errors_only(r#"{"data":null,"errors":[{"message":"Something went wrong"}]}"#), Some("Something went wrong".to_string()));
+        assert_eq!(graphql_errors_only(r#"{"data":{"nodes":[null]},"errors":[{"message":"Could not resolve to a node"}]}"#), None);
+        assert_eq!(graphql_errors_only(r#"{"data":{"viewer":{"login":"a"}}}"#), None);
+        assert!(matches!(classify_graphql_error("Something went wrong while executing your query".to_string()), GithubError::Retryable(_)));
+        assert!(matches!(classify_graphql_error("Could not resolve to a Repository".to_string()), GithubError::Fatal(_)));
     }
 
     #[test]

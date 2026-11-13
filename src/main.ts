@@ -1713,6 +1713,35 @@ async function loadMergeStates(kind: QueueKind, pulls: PullRequest[]): Promise<v
   }
 }
 
+/** The last good list per view, shown instantly on launch while GitHub is asked again (it can take several seconds). */
+const SAVED_QUEUE_KEY = (kind: QueueKind): string => `queue.v1.${kind}`;
+const SAVED_QUEUE_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
+const savedQueueAt = new Map<QueueKind, number>();
+
+function saveQueue(kind: QueueKind, pulls: PullRequest[]): void {
+  try {
+    localStorage.setItem(SAVED_QUEUE_KEY(kind), JSON.stringify({ at: Date.now(), viewer, pulls }));
+  } catch {
+    localStorage.removeItem(SAVED_QUEUE_KEY(kind));
+  }
+}
+
+function restoreSavedQueues(): void {
+  (['mine', 'review', 'involved'] satisfies QueueKind[]).forEach((kind) => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(SAVED_QUEUE_KEY(kind)) ?? 'null') as { at: number; pulls: PullRequest[] } | null;
+      if (saved == null || !Array.isArray(saved.pulls) || Date.now() - saved.at > SAVED_QUEUE_MAX_AGE_MS) return;
+      queueCache.set(kind, saved.pulls.map(withOptimisticQueue));
+      savedQueueAt.set(kind, saved.at);
+    } catch {
+      localStorage.removeItem(SAVED_QUEUE_KEY(kind));
+    }
+  });
+  renderCounts();
+  const pulls = queueCache.get(state.kind);
+  if (pulls != null && pulls.length > 0) applyQueue(pulls);
+}
+
 const inFlight = new Map<QueueKind, Promise<void>>();
 const lastFetchedAt = new Map<QueueKind, number>();
 const MIN_REFRESH_GAP_MS = 20_000;
@@ -1733,7 +1762,9 @@ function renderRefreshStatus(): void {
   }
   const at = lastFetchedAt.get(state.kind);
   if (at == null) {
-    status.textContent = '';
+    const savedAt = savedQueueAt.get(state.kind);
+    status.textContent = savedAt == null ? '' : 'Saved list';
+    if (savedAt != null) status.title = `Showing the list from ${new Date(savedAt).toLocaleString()} until GitHub answers`;
     return;
   }
   const seconds = Math.round((Date.now() - at) / 1000);
@@ -1782,6 +1813,7 @@ function refresh(kind: QueueKind, isForced = false): Promise<void> {
       lastFetchedAt.set(kind, Date.now());
       const merged = pulls.map((pull) => withOptimisticQueue(mergeStateCache.has(pull.id) && mergeStateCache.get(pull.id)?.updatedAt === pull.updatedAt ? { ...pull, ...mergeStateCache.get(pull.id)?.state } : pull));
       queueCache.set(kind, merged);
+      saveQueue(kind, merged);
       renderCounts();
       if (kind === state.kind) applyQueue(merged);
       if (kind === state.kind) void scoreWithJev(merged);
@@ -3646,7 +3678,8 @@ const checkForUpdates = startAutoUpdate({
 });
 let restartIntoUpdate: (() => void) | null = null;
 
-renderBootSkeletons();
+restoreSavedQueues();
+if (state.pulls.length === 0) renderBootSkeletons();
 (['mine', 'review', 'involved'] satisfies QueueKind[]).forEach((kind) => void refresh(kind, true));
 
 if (import.meta.env.VITE_PR_REVIEW_HARNESS === '1') {

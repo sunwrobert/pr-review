@@ -104,7 +104,8 @@ function toPullRequest({ commits, mergeQueueEntry, stackEntry, stack, ...pull }:
   return { ...pull, queueEntry: mergeQueueEntry ?? null, stack: toStack(stack, stackEntry?.position), mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: commits.nodes[0]?.commit.statusCheckRollup?.state ?? null };
 }
 
-const MERGE_STATE_BATCH = 20;
+/** 10 per request with 12 in flight: ~8 s for 280 PRs, versus ~16 s for 20 per request (the isRequired check scales badly per batch). */
+const MERGE_STATE_BATCH = 10;
 
 interface MergeStateResponse {
   data?: Record<string, RawMergeState | null>;
