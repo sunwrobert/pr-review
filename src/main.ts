@@ -1215,15 +1215,16 @@ function renderDescription(pull: PullRequest): HTMLElement {
 
 
 const DEVIN_LOGO = '<svg class="devin-logo" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M5.9 1.6 8.3 3v2.8L5.9 7.2 3.5 5.8V3zM11.1 4.6l2.4 1.4v2.8l-2.4 1.4-2.4-1.4V6zM5.9 8.8l2.4 1.4V13l-2.4 1.4L3.5 13v-2.8z"/><path d="M8.2 5.7 8.9 6.2M8.2 10.3 8.9 9.8" stroke="currentColor" stroke-width="1.2"/></svg>';
-const BULK_FIX_MESSAGE = 'Fix CI and merge conflicts if any';
+const BULK_FIX_MESSAGE = 'Fix CI and merge conflicts if any, then request review if it is not approved yet';
+const REVIEW_REQUEST = 'request review if it is not approved yet';
 
+/** The ⇧F message: fix what is broken, then ask for review when the PR still needs approval. Null when nothing needs fixing. */
 function devinFixMessage(pull: PullRequest): string | null {
   const conflicted = isConflicted(pull);
   const failing = isFailing(pull);
-  if (conflicted && failing) return 'Fix CI and merge conflicts';
-  if (conflicted) return 'Fix merge conflicts';
-  if (failing) return 'Fix CI';
-  return null;
+  const fix = conflicted && failing ? 'Fix CI and merge conflicts' : conflicted ? 'Fix merge conflicts' : failing ? 'Fix CI' : null;
+  if (fix == null) return null;
+  return pull.reviewDecision === 'APPROVED' ? fix : `${fix}, then ${REVIEW_REQUEST}`;
 }
 
 function fixButton(pull: PullRequest): string {
