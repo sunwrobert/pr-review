@@ -7,11 +7,15 @@ export interface StackSlot {
   size: number;
 }
 
-type StackPull = Pick<PullRequest, 'id' | 'number' | 'headRefName' | 'baseRefName' | 'repository'>;
+type StackPull = Pick<PullRequest, 'id' | 'number' | 'headRefName' | 'baseRefName' | 'repository'> & { stack?: PullRequest['stack'] };
 
 const branchKey = (repo: string, branch: string): string => `${repo}\u0000${branch}`;
 
-/** Finds stacks: pulls in one repo where a pull's base branch is another open pull's head branch. */
+/**
+ * Finds stacks: pulls in one repo where a pull's base branch is another open pull's head branch.
+ * A pull in a GitHub stack only links to pulls in that same GitHub stack, and a pull outside one never links into one:
+ * several PRs based on one branch are siblings, not a stack, unless GitHub says so.
+ */
 export function findStacks(pulls: readonly StackPull[]): Map<string, StackSlot> {
   const byHead = new Map<string, StackPull>();
   pulls.forEach((pull) => {
@@ -20,7 +24,8 @@ export function findStacks(pulls: readonly StackPull[]): Map<string, StackSlot> 
   });
   const parentOf = (pull: StackPull): StackPull | undefined => {
     const parent = byHead.get(branchKey(pull.repository.nameWithOwner, pull.baseRefName));
-    return parent === pull ? undefined : parent;
+    if (parent === pull || parent == null) return undefined;
+    return isNative(pull) === isNative(parent) ? parent : undefined;
   };
   const children = new Map<string, StackPull[]>();
   pulls.forEach((pull) => {
@@ -62,6 +67,11 @@ export async function collectStack<T extends { id: string }>(start: T, neighbors
     frontier = batches.flat().filter((pull) => !found.has(pull.id) && found.size < limit && found.set(pull.id, pull) != null);
   }
   return [...found.values()];
+}
+
+/** In a GitHub-native stack, which GitHub reports on the pull itself. */
+function isNative(pull: StackPull): boolean {
+  return pull.stack != null;
 }
 
 function walk(pull: StackPull, children: ReadonlyMap<string, StackPull[]>, seen: Set<string>): StackPull[] {

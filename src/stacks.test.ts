@@ -21,6 +21,24 @@ describe('findStacks', () => {
     expect(findStacks([pull(1, 'a', 'b'), pull(2, 'b', 'a')]).size).toBe(0);
   });
 
+  test('PRs that only share a base branch with a GitHub stack are not pulled into it', () => {
+    const native = { baseRefName: 'main', mergeCount: 1 };
+    const slots = findStacks([
+      { ...pull(60511, 'smoke', 'main'), stack: native },
+      { ...pull(60517, 'mcp', 'smoke'), stack: null },
+      { ...pull(60518, 'chat', 'smoke'), stack: null },
+      { ...pull(60519, 'expiry', 'smoke'), stack: null },
+      { ...pull(60527, 'rankings', 'smoke'), stack: { baseRefName: 'main', mergeCount: 2 } },
+    ]);
+    expect([...slots.keys()].sort()).toEqual(['p60511', 'p60527']);
+    expect(slots.get('p60527')).toEqual({ stackId: 'p60511', index: 1, size: 2 });
+  });
+
+  test('hand-made chains outside GitHub stacks still group by branch', () => {
+    const slots = findStacks([{ ...pull(1, 'a', 'main'), stack: null }, { ...pull(2, 'b', 'a'), stack: null }]);
+    expect(slots.get('p2')).toEqual({ stackId: 'p1', index: 1, size: 2 });
+  });
+
   test('branches list siblings by number under their parent', () => {
     const slots = findStacks([pull(1, 'a', 'main'), pull(5, 'y', 'a'), pull(4, 'x', 'a')]);
     expect([...slots.entries()].sort((l, r) => l[1].index - r[1].index).map(([id]) => id)).toEqual(['p1', 'p4', 'p5']);
