@@ -42,35 +42,39 @@ export interface MergeState {
   failingOptional: number;
 }
 
-interface RawCheck {
-  __typename: 'CheckRun' | 'StatusContext';
-  name?: string;
-  context?: string;
-  conclusion?: string | null;
-  state?: string;
-  isRequired?: boolean;
+export interface MergeStateUpdate {
+  id: string;
+  mergeable?: MergeableState;
+  mergeStateStatus?: string;
+  openThreads?: number;
+  failingRequired?: string[];
+  failingOptional?: number;
 }
 
 interface RawMergeState {
   id: string;
-  mergeable: MergeableState;
-  mergeStateStatus: string;
-  reviewThreads?: { nodes: { isResolved: boolean; isOutdated: boolean }[] };
-  commits?: { nodes: { commit: { statusCheckRollup: { contexts: { nodes: (RawCheck | null)[] } } | null } }[] };
+  mergeable?: MergeableState;
+  mergeStateStatus?: string;
+  reviewThreads?: { nodes: { isResolved: boolean }[] };
 }
 
-const FAILED_CHECK = new Set(['FAILURE', 'ERROR', 'TIMED_OUT', 'CANCELLED', 'ACTION_REQUIRED', 'STARTUP_FAILURE']);
+function toCoreMergeState({ id, mergeable, mergeStateStatus, reviewThreads }: RawMergeState): MergeStateUpdate {
+  const update: MergeStateUpdate = { id };
+  if (mergeable != null) update.mergeable = mergeable;
+  if (mergeStateStatus != null) update.mergeStateStatus = mergeStateStatus;
+  if (reviewThreads != null) update.openThreads = reviewThreads.nodes.filter((thread) => !thread.isResolved).length;
+  return update;
+}
 
-function toMergeState({ reviewThreads, commits, ...rest }: RawMergeState): MergeState {
-  const checks = (commits?.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? []).filter((check): check is RawCheck => check != null);
-  const failed = checks.filter((check) => FAILED_CHECK.has(check.conclusion ?? check.state ?? ''));
-  const required = failed.filter((check) => check.isRequired === true);
-  return {
-    ...rest,
-    openThreads: (reviewThreads?.nodes ?? []).filter((thread) => !thread.isResolved).length,
-    failingRequired: required.map((check) => check.name ?? check.context ?? 'check'),
-    failingOptional: failed.length - required.length,
-  };
+interface FailingCheckRow {
+  id: string;
+  failingRequired: string[];
+  failingOptional: number;
+}
+
+interface FailingChecksResponse {
+  data?: FailingCheckRow[];
+  errors?: { message: string }[];
 }
 
 interface RawStack {
@@ -104,21 +108,62 @@ function toPullRequest({ commits, mergeQueueEntry, stackEntry, stack, ...pull }:
   return { ...pull, queueEntry: mergeQueueEntry ?? null, stack: toStack(stack, stackEntry?.position), mergeable: 'UNKNOWN', mergeStateStatus: 'UNKNOWN', checkState: commits.nodes[0]?.commit.statusCheckRollup?.state ?? null };
 }
 
-/** 10 per request with 12 in flight: ~8 s for 280 PRs, versus ~16 s for 20 per request (the isRequired check scales badly per batch). */
-const MERGE_STATE_BATCH = 10;
+/** 12 per request matches the 12-slot HTTP pool and keeps GitHub's parallel mergeable workers saturated. */
+const MERGE_STATE_BATCH = 12;
+const CHECK_TARGET_BATCH = 25;
 
 interface MergeStateResponse {
-  data?: Record<string, RawMergeState | null>;
+  data?: { nodes?: (RawMergeState | null)[] } | Record<string, RawMergeState | null>;
   errors?: { message: string }[];
 }
 
-export async function fetchMergeStates(ids: readonly string[], onBatch: (states: MergeState[]) => void): Promise<void> {
+function extractMergeStateNodes(data: MergeStateResponse['data']): RawMergeState[] {
+  if (data == null) return [];
+  const raw = Array.isArray((data as { nodes?: unknown }).nodes) ? (data as { nodes: (RawMergeState | null)[] }).nodes : Object.values(data as Record<string, RawMergeState | null>);
+  return raw.filter((node): node is RawMergeState => node?.id != null);
+}
+
+export async function fetchMergeStates(pulls: readonly PullRequest[], onBatch: (states: MergeStateUpdate[]) => void): Promise<void> {
+  if (pulls.length === 0) return;
+  const cleanCheckUpdates: MergeStateUpdate[] = [];
+  const checkTargets: { id: string; repo: string; base: string }[] = [];
+  for (const pull of pulls) {
+    if (pull.checkState == null || pull.checkState === 'SUCCESS') {
+      cleanCheckUpdates.push({ id: pull.id, failingRequired: [], failingOptional: 0 });
+    } else {
+      checkTargets.push({ id: pull.id, repo: pull.repository.nameWithOwner, base: pull.stack?.baseRefName ?? pull.baseRefName });
+    }
+  }
+  if (cleanCheckUpdates.length > 0) onBatch(cleanCheckUpdates);
+
+  const ids = pulls.map((pull) => pull.id);
+  const coreBatches = Array.from({ length: Math.ceil(ids.length / MERGE_STATE_BATCH) }, (_, index) => ids.slice(index * MERGE_STATE_BATCH, (index + 1) * MERGE_STATE_BATCH));
+  const checkBatches = Array.from({ length: Math.ceil(checkTargets.length / CHECK_TARGET_BATCH) }, (_, index) => checkTargets.slice(index * CHECK_TARGET_BATCH, (index + 1) * CHECK_TARGET_BATCH));
+
+  const results = await Promise.allSettled([
+    ...coreBatches.map(async (batch) => {
+      const response: MergeStateResponse = JSON.parse(await invoke<string>('merge_states', { ids: batch }));
+      if (response.data == null) throw new Error(response.errors?.map((error) => error.message).join('; ') ?? 'Empty response');
+      onBatch(extractMergeStateNodes(response.data).map(toCoreMergeState));
+    }),
+    ...checkBatches.map(async (batch) => {
+      const response: FailingChecksResponse = JSON.parse(await invoke<string>('failing_checks', { pulls: batch }));
+      if (response.data == null) throw new Error(response.errors?.map((error) => error.message).join('; ') ?? 'Empty response');
+      onBatch(response.data.map((row) => ({ id: row.id, failingRequired: row.failingRequired, failingOptional: row.failingOptional })));
+    }),
+  ]);
+  const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+  if (failure != null) throw failure.reason instanceof Error ? failure.reason : new Error(String(failure.reason));
+}
+
+export async function pollMergeStatuses(ids: readonly string[], onBatch: (states: MergeStateUpdate[]) => void): Promise<void> {
+  if (ids.length === 0) return;
   const batches = Array.from({ length: Math.ceil(ids.length / MERGE_STATE_BATCH) }, (_, index) => ids.slice(index * MERGE_STATE_BATCH, (index + 1) * MERGE_STATE_BATCH));
   const results = await Promise.allSettled(
     batches.map(async (batch) => {
-      const response: MergeStateResponse = JSON.parse(await invoke<string>('merge_states', { ids: batch }));
+      const response: MergeStateResponse = JSON.parse(await invoke<string>('merge_status_poll', { ids: batch }));
       if (response.data == null) throw new Error(response.errors?.map((error) => error.message).join('; ') ?? 'Empty response');
-      onBatch(Object.values(response.data).filter((node): node is RawMergeState => node?.id != null).map(toMergeState));
+      onBatch(extractMergeStateNodes(response.data).map(toCoreMergeState));
     }),
   );
   const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');

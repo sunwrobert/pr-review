@@ -36,10 +36,12 @@ const QUEUE_DETAIL_FIELDS: &str = r#"
   stack { baseRefName entries(first: 100) { nodes { position pullRequest { state } } } }
 }"#;
 
-/// PRs per detail request: ~2 s for 25 at full fields; 50 occasionally hits the same gateway timeout as search.
-const QUEUE_DETAIL_BATCH: usize = 25;
+/// PRs per detail request: 16 fills the 12-slot pool cleanly on ~130-PR queues without hitting search-style 502s.
+const QUEUE_DETAIL_BATCH: usize = 16;
 
 const MAX_MERGE_STATE_IDS: usize = 25;
+const MAX_CHECK_TARGETS: usize = 25;
+const RULES_CACHE_TTL_SECS: u64 = 300;
 /// 100 is GitHub's max for search; it adds only ~1 s per page versus 50 and halves page count for large queues.
 const QUEUE_PAGE_SIZE: usize = 100;
 
@@ -262,32 +264,94 @@ fn search_query(kind: QueueKind) -> &'static str {
     }
 }
 
+fn search_query_asc(kind: QueueKind) -> &'static str {
+    match kind {
+        QueueKind::Review => "is:pr is:open archived:false review-requested:@me sort:updated-asc",
+        QueueKind::Mine => "is:pr is:open archived:false author:@me sort:updated-asc",
+        QueueKind::Involved => "is:pr is:open archived:false involves:@me sort:updated-asc",
+    }
+}
+
+fn extract_search_nodes(page: &serde_json::Value) -> Vec<serde_json::Value> {
+    page["data"]["search"]["nodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|node| node["id"].is_string())
+        .collect()
+}
+
+fn spawn_detail_batches(details: &mut tokio::task::JoinSet<Result<String, String>>, detail_query: &str, nodes: &[serde_json::Value]) {
+    let ids: Vec<String> = nodes.iter().filter_map(|node| node["id"].as_str().map(str::to_string)).collect();
+    for batch in ids.chunks(QUEUE_DETAIL_BATCH) {
+        let (query, ids) = (detail_query.to_string(), batch.to_vec());
+        details.spawn(async move { graphql(&query, serde_json::json!({ "ids": ids })).await });
+    }
+}
+
 #[tauri::command]
 async fn queue(kind: QueueKind) -> Result<String, String> {
     let search = format!(
         "query($q: String!, $cursor: String) {{ search(query: $q, type: ISSUE, first: {QUEUE_PAGE_SIZE}, after: $cursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {QUEUE_SEARCH_FIELDS} }} }} }}"
     );
     let detail = format!("query($ids: [ID!]!) {{ nodes(ids: $ids) {{ {QUEUE_DETAIL_FIELDS} }} }}");
-    let mut nodes: Vec<serde_json::Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut desc_nodes: Vec<serde_json::Value> = Vec::new();
+    let mut asc_tail: Vec<serde_json::Value> = Vec::new();
     let mut details = tokio::task::JoinSet::new();
-    let mut cursor: Option<String> = None;
-    // Detail batches start as soon as each search page lands, so they overlap the remaining pages.
-    loop {
+
+    // Fire newest-first and oldest-first page 1 in parallel: covers <=200 PRs in 1 search round-trip.
+    let (desc_raw, asc_raw) = tokio::join!(
+        graphql(&search, serde_json::json!({ "q": search_query(kind), "cursor": serde_json::Value::Null })),
+        graphql(&search, serde_json::json!({ "q": search_query_asc(kind), "cursor": serde_json::Value::Null })),
+    );
+    let first_page: serde_json::Value = serde_json::from_str(&desc_raw?).map_err(|error| format!("invalid search response: {error}"))?;
+    let first_search = &first_page["data"]["search"];
+    let issue_count = first_search["issueCount"].as_u64().unwrap_or(0) as usize;
+    let mut cursor = first_search["pageInfo"]["endCursor"].as_str().map(str::to_string);
+    let mut has_next = first_search["pageInfo"]["hasNextPage"].as_bool() == Some(true);
+
+    let first_nodes: Vec<serde_json::Value> = extract_search_nodes(&first_page)
+        .into_iter()
+        .filter(|node| node["id"].as_str().is_some_and(|id| seen.insert(id.to_string())))
+        .collect();
+    spawn_detail_batches(&mut details, &detail, &first_nodes);
+    desc_nodes.extend(first_nodes);
+
+    if let Ok(text) = asc_raw {
+        if let Ok(asc_page) = serde_json::from_str::<serde_json::Value>(&text) {
+            // Reverse asc-only nodes so the merged list stays ordered updated-desc.
+            let extra: Vec<serde_json::Value> = extract_search_nodes(&asc_page)
+                .into_iter()
+                .rev()
+                .filter(|node| node["id"].as_str().is_some_and(|id| seen.insert(id.to_string())))
+                .collect();
+            spawn_detail_batches(&mut details, &detail, &extra);
+            asc_tail = extra;
+        }
+    }
+
+    // Only paginate the middle gap when more than 200 PRs exist (or if the asc fetch failed).
+    while has_next && cursor.is_some() && (issue_count == 0 || seen.len() < issue_count) {
         let page: serde_json::Value = serde_json::from_str(&graphql(&search, serde_json::json!({ "q": search_query(kind), "cursor": cursor })).await?)
             .map_err(|error| format!("invalid search response: {error}"))?;
         let result = &page["data"]["search"];
-        let page_nodes: Vec<serde_json::Value> = result["nodes"].as_array().cloned().unwrap_or_default().into_iter().filter(|node| node["id"].is_string()).collect();
-        let ids: Vec<String> = page_nodes.iter().filter_map(|node| node["id"].as_str().map(str::to_string)).collect();
-        for batch in ids.chunks(QUEUE_DETAIL_BATCH) {
-            let (query, ids) = (detail.clone(), batch.to_vec());
-            details.spawn(async move { graphql(&query, serde_json::json!({ "ids": ids })).await });
-        }
-        nodes.extend(page_nodes);
-        cursor = result["pageInfo"]["endCursor"].as_str().map(str::to_string);
-        if result["pageInfo"]["hasNextPage"].as_bool() != Some(true) || cursor.is_none() {
+        let fresh: Vec<serde_json::Value> = extract_search_nodes(&page)
+            .into_iter()
+            .filter(|node| node["id"].as_str().is_some_and(|id| seen.insert(id.to_string())))
+            .collect();
+        if fresh.is_empty() {
             break;
         }
+        spawn_detail_batches(&mut details, &detail, &fresh);
+        desc_nodes.extend(fresh);
+        cursor = result["pageInfo"]["endCursor"].as_str().map(str::to_string);
+        has_next = result["pageInfo"]["hasNextPage"].as_bool() == Some(true);
     }
+
+    desc_nodes.extend(asc_tail);
+
     let mut by_id: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
     let mut failures = 0;
     while let Some(joined) = details.join_next().await {
@@ -305,7 +369,7 @@ async fn queue(kind: QueueKind) -> Result<String, String> {
     if failures > 0 {
         eprintln!("[github] queue: {failures} detail batch(es) failed after retries; those rows show without checks or size");
     }
-    let merged: Vec<serde_json::Value> = nodes
+    let merged: Vec<serde_json::Value> = desc_nodes
         .into_iter()
         .map(|mut node| {
             let extra = node_detail(&by_id, &node);
@@ -333,12 +397,272 @@ async fn merge_states(ids: Vec<String>) -> Result<String, String> {
     if ids.is_empty() || ids.len() > MAX_MERGE_STATE_IDS || !ids.iter().all(|id| is_node_id(id)) {
         return Err("invalid pull request ids".to_string());
     }
-    // isRequired needs the PR id as an argument, so each PR gets its own aliased field.
-    let fields: Vec<String> = ids.iter().enumerate().map(|(index, id)| format!(
-        "p{index}: node(id: \"{id}\") {{ ... on PullRequest {{ id mergeable mergeStateStatus reviewThreads(first: 100) {{ nodes {{ isResolved isOutdated }} }} commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100) {{ nodes {{ __typename ... on CheckRun {{ name conclusion isRequired(pullRequestId: \"{id}\") }} ... on StatusContext {{ context state isRequired(pullRequestId: \"{id}\") }} }} }} }} }} }} }} }} }}"
-    )).collect();
-    let query = format!("query {{ {} }}", fields.join(" "));
-    graphql(&query, serde_json::json!({})).await
+    // Check contexts moved to `failing_checks` (only non-SUCCESS PRs), so this batch stays light and skips `isRequired`.
+    let query = "query($ids: [ID!]!) { nodes(ids: $ids) { ... on PullRequest { id mergeable mergeStateStatus reviewThreads(first: 100) { nodes { isResolved } } } } }";
+    graphql(query, serde_json::json!({ "ids": ids })).await
+}
+
+/// Lightweight retry query for PRs whose mergeability was still UNKNOWN on the first pass.
+#[tauri::command]
+async fn merge_status_poll(ids: Vec<String>) -> Result<String, String> {
+    if ids.is_empty() || ids.len() > MAX_MERGE_STATE_IDS || !ids.iter().all(|id| is_node_id(id)) {
+        return Err("invalid pull request ids".to_string());
+    }
+    let query = "query($ids: [ID!]!) { nodes(ids: $ids) { ... on PullRequest { id mergeable mergeStateStatus } } }";
+    graphql(query, serde_json::json!({ "ids": ids })).await
+}
+
+#[derive(Deserialize, Clone)]
+struct CheckTarget {
+    id: String,
+    repo: String,
+    base: String,
+}
+
+type RulesCacheEntry = (std::time::Instant, Option<std::collections::HashSet<String>>);
+static RULES_CACHE: tokio::sync::Mutex<Option<std::collections::HashMap<(String, String), RulesCacheEntry>>> = tokio::sync::Mutex::const_new(None);
+
+fn encode_branch_path(branch: &str) -> String {
+    let mut encoded = String::with_capacity(branch.len());
+    for byte in branch.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'/' => encoded.push(byte as char),
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+fn parse_required_check_rules(text: &str) -> Option<std::collections::HashSet<String>> {
+    let rules: serde_json::Value = serde_json::from_str(text).ok()?;
+    let mut names = std::collections::HashSet::new();
+    for rule in rules.as_array()? {
+        if rule["type"].as_str() != Some("required_status_checks") {
+            continue;
+        }
+        for check in rule["parameters"]["required_status_checks"].as_array().into_iter().flatten() {
+            if let Some(context) = check["context"].as_str() {
+                if !context.is_empty() {
+                    names.insert(context.to_string());
+                }
+            }
+        }
+    }
+    (!names.is_empty()).then_some(names)
+}
+
+async fn required_checks_for_branch(repo: &str, base: &str) -> Option<std::collections::HashSet<String>> {
+    let key = (repo.to_string(), base.to_string());
+    {
+        let cache = RULES_CACHE.lock().await;
+        if let Some((fetched_at, entry)) = cache.as_ref().and_then(|map| map.get(&key)) {
+            if fetched_at.elapsed().as_secs() < RULES_CACHE_TTL_SECS {
+                return entry.clone();
+            }
+        }
+    }
+    let path = format!("repos/{repo}/rules/branches/{}", encode_branch_path(base));
+    let parsed = github(Method::Get, &path, None, None).await.ok().and_then(|text| parse_required_check_rules(&text));
+    let mut cache = RULES_CACHE.lock().await;
+    cache
+        .get_or_insert_with(std::collections::HashMap::new)
+        .insert(key, (std::time::Instant::now(), parsed.clone()));
+    parsed
+}
+
+struct LatestCheck {
+    failed: bool,
+    required: bool,
+    timestamp: String,
+}
+
+fn is_failed_conclusion(value: &str) -> bool {
+    matches!(value, "FAILURE" | "ERROR" | "TIMED_OUT" | "CANCELLED" | "ACTION_REQUIRED" | "STARTUP_FAILURE")
+}
+
+fn fold_check_nodes(
+    latest: &mut std::collections::HashMap<String, LatestCheck>,
+    nodes: &[serde_json::Value],
+    static_required: Option<&std::collections::HashSet<String>>,
+) {
+    for node in nodes {
+        let Some(kind) = node["__typename"].as_str() else { continue };
+        let (name, timestamp, failed, required) = match kind {
+            "CheckRun" => {
+                let Some(name) = node["name"].as_str() else { continue };
+                let timestamp = node["completedAt"]
+                    .as_str()
+                    .or_else(|| node["startedAt"].as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let completed = node["status"].as_str().map(|status| status.eq_ignore_ascii_case("COMPLETED")).unwrap_or(true);
+                let failed = completed && node["conclusion"].as_str().is_some_and(is_failed_conclusion);
+                let required = static_required.map_or_else(|| node["isRequired"].as_bool() == Some(true), |set| set.contains(name));
+                (name.to_string(), timestamp, failed, required)
+            }
+            "StatusContext" => {
+                let Some(name) = node["context"].as_str() else { continue };
+                let timestamp = node["createdAt"].as_str().unwrap_or("").to_string();
+                let failed = node["state"].as_str().is_some_and(is_failed_conclusion);
+                let required = static_required.map_or_else(|| node["isRequired"].as_bool() == Some(true), |set| set.contains(name));
+                (name.to_string(), timestamp, failed, required)
+            }
+            _ => continue,
+        };
+        match latest.get_mut(&name) {
+            Some(prev) if timestamp < prev.timestamp => {
+                prev.required |= required;
+            }
+            Some(prev) => {
+                prev.failed = failed;
+                prev.required |= required;
+                prev.timestamp = timestamp;
+            }
+            None => {
+                latest.insert(name, LatestCheck { failed, required, timestamp });
+            }
+        }
+    }
+}
+
+fn summarize_checks(latest: &std::collections::HashMap<String, LatestCheck>) -> (Vec<String>, usize) {
+    let mut failing_required: Vec<String> = Vec::new();
+    let mut failing_optional = 0;
+    for (name, check) in latest {
+        if !check.failed {
+            continue;
+        }
+        if check.required {
+            failing_required.push(name.clone());
+        } else {
+            failing_optional += 1;
+        }
+    }
+    failing_required.sort();
+    (failing_required, failing_optional)
+}
+
+async fn fetch_pr_checks_pages(
+    id: String,
+    static_required: Option<std::collections::HashSet<String>>,
+    mut latest: std::collections::HashMap<String, LatestCheck>,
+    mut cursor: Option<String>,
+) -> Result<(String, Vec<String>, usize), String> {
+    let req_field = if static_required.is_some() { String::new() } else { format!(" isRequired(pullRequestId: \"{id}\")") };
+    let query = format!(
+        "query($id: ID!, $cursor: String) {{ node(id: $id) {{ ... on PullRequest {{ commits(last: 1) {{ nodes {{ commit {{ statusCheckRollup {{ contexts(first: 100, after: $cursor) {{ pageInfo {{ hasNextPage endCursor }} nodes {{ __typename ... on CheckRun {{ name status conclusion completedAt startedAt{req_field} }} ... on StatusContext {{ context state createdAt{req_field} }} }} }} }} }} }} }} }} }} }}"
+    );
+    loop {
+        let text = graphql(&query, serde_json::json!({ "id": id, "cursor": cursor })).await?;
+        let parsed: serde_json::Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
+        let contexts = &parsed["data"]["node"]["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"];
+        if let Some(nodes) = contexts["nodes"].as_array() {
+            fold_check_nodes(&mut latest, nodes, static_required.as_ref());
+        }
+        let has_next = contexts["pageInfo"]["hasNextPage"].as_bool() == Some(true);
+        cursor = contexts["pageInfo"]["endCursor"].as_str().map(str::to_string);
+        if !has_next || cursor.is_none() {
+            break;
+        }
+    }
+    let (failing_required, failing_optional) = summarize_checks(&latest);
+    Ok((id, failing_required, failing_optional))
+}
+
+const STATIC_CHECK_BATCH: usize = 8;
+
+/// Paginated, rerun-deduped failing checks for non-SUCCESS PRs. Uses cached branch rulesets to batch static PRs
+/// via `nodes(ids)` without `isRequired`, and falls back to `isRequired(pullRequestId)` when no ruleset applies.
+#[tauri::command]
+async fn failing_checks(pulls: Vec<CheckTarget>) -> Result<String, String> {
+    if pulls.is_empty() {
+        return Ok(serde_json::json!({ "data": [] }).to_string());
+    }
+    if pulls.len() > MAX_CHECK_TARGETS {
+        return Err("too many check targets".to_string());
+    }
+    for target in &pulls {
+        if !is_node_id(&target.id) || validate_repo(&target.repo).is_err() || !is_safe_branch(&target.base) {
+            return Err("invalid check target".to_string());
+        }
+    }
+    let unique_branches: std::collections::HashSet<(String, String)> = pulls.iter().map(|t| (t.repo.clone(), t.base.clone())).collect();
+    let mut rules_jobs = tokio::task::JoinSet::new();
+    for (repo, base) in unique_branches {
+        rules_jobs.spawn(async move {
+            let set = required_checks_for_branch(&repo, &base).await;
+            ((repo, base), set)
+        });
+    }
+    let mut rules_map: std::collections::HashMap<(String, String), Option<std::collections::HashSet<String>>> = std::collections::HashMap::new();
+    while let Some(Ok((key, set))) = rules_jobs.join_next().await {
+        rules_map.insert(key, set);
+    }
+
+    let mut static_targets: Vec<(String, std::collections::HashSet<String>)> = Vec::new();
+    let mut dynamic_ids: Vec<String> = Vec::new();
+    for target in pulls {
+        match rules_map.get(&(target.repo, target.base)).cloned().flatten() {
+            Some(req_set) => static_targets.push((target.id, req_set)),
+            None => dynamic_ids.push(target.id),
+        }
+    }
+
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mut follow_up = tokio::task::JoinSet::new();
+
+    for id in dynamic_ids {
+        follow_up.spawn(fetch_pr_checks_pages(id, None, std::collections::HashMap::new(), None));
+    }
+
+    // First page of all static-ruleset PRs in compact `nodes(ids)` batches (no `isRequired` resolver).
+    let batch_query = "query($ids: [ID!]!) { nodes(ids: $ids) { ... on PullRequest { id commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { pageInfo { hasNextPage endCursor } nodes { __typename ... on CheckRun { name status conclusion completedAt startedAt } ... on StatusContext { context state createdAt } } } } } } } } } }";
+    let mut batch_jobs = tokio::task::JoinSet::new();
+    for chunk in static_targets.chunks(STATIC_CHECK_BATCH) {
+        let ids: Vec<String> = chunk.iter().map(|(id, _)| id.clone()).collect();
+        let req_by_id: std::collections::HashMap<String, std::collections::HashSet<String>> = chunk.iter().cloned().collect();
+        batch_jobs.spawn(async move {
+            let text = graphql(batch_query, serde_json::json!({ "ids": ids })).await?;
+            Ok::<_, String>((text, req_by_id))
+        });
+    }
+
+    while let Some(joined) = batch_jobs.join_next().await {
+        let Ok(Ok((text, req_by_id))) = joined else { continue };
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        for node in parsed["data"]["nodes"].as_array().into_iter().flatten() {
+            let Some(id) = node["id"].as_str() else { continue };
+            let Some(req_set) = req_by_id.get(id) else { continue };
+            let mut latest = std::collections::HashMap::new();
+            let contexts = &node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["contexts"];
+            if let Some(nodes) = contexts["nodes"].as_array() {
+                fold_check_nodes(&mut latest, nodes, Some(req_set));
+            }
+            let has_next = contexts["pageInfo"]["hasNextPage"].as_bool() == Some(true);
+            let cursor = contexts["pageInfo"]["endCursor"].as_str().map(str::to_string);
+            if has_next && cursor.is_some() {
+                follow_up.spawn(fetch_pr_checks_pages(id.to_string(), Some(req_set.clone()), latest, cursor));
+            } else {
+                let (failing_required, failing_optional) = summarize_checks(&latest);
+                rows.push(serde_json::json!({
+                    "id": id,
+                    "failingRequired": failing_required,
+                    "failingOptional": failing_optional,
+                }));
+            }
+        }
+    }
+
+    while let Some(joined) = follow_up.join_next().await {
+        if let Ok(Ok((id, failing_required, failing_optional))) = joined {
+            rows.push(serde_json::json!({
+                "id": id,
+                "failingRequired": failing_required,
+                "failingOptional": failing_optional,
+            }));
+        }
+    }
+    Ok(serde_json::json!({ "data": rows }).to_string())
 }
 
 fn is_safe_branch(branch: &str) -> bool {
@@ -897,7 +1221,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, pull, stack_neighbors, viewer, comment, message_devin, threads, dequeue, set_thread_resolved, reply_to_thread, merge_queue, merge_states, conversation, body, diff, approve, merge, close, open_in_browser, review_context, readiness_available, readiness, group_files])
+        .invoke_handler(tauri::generate_handler![queue, pull, stack_neighbors, viewer, comment, message_devin, threads, dequeue, set_thread_resolved, reply_to_thread, merge_queue, merge_states, merge_status_poll, failing_checks, conversation, body, diff, approve, merge, close, open_in_browser, review_context, readiness_available, readiness, group_files])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }
@@ -905,13 +1229,13 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_graphql_error, extract_devin_org_id, graphql_errors_only, parse_devin_credentials, DevinCredentials, GithubError};
+    use super::{classify_graphql_error, extract_devin_org_id, fold_check_nodes, graphql_errors_only, parse_devin_credentials, parse_required_check_rules, summarize_checks, DevinCredentials, GithubError, LatestCheck};
 
     /// Talks to the real GitHub API with gh's token: `cargo test -- --ignored live_github --nocapture`.
     #[tokio::test]
     #[ignore]
     async fn live_github_queue_and_pull_loads() {
-        use super::{body, conversation, diff, queue, viewer, QueueKind};
+        use super::{body, conversation, diff, failing_checks, merge_states, queue, viewer, CheckTarget, QueueKind};
         let started = std::time::Instant::now();
         let login = viewer().await.expect("viewer");
         println!("viewer {login} in {} ms", started.elapsed().as_millis());
@@ -925,6 +1249,40 @@ mod tests {
             println!("queue {:?}: {} PRs, {} with details, {} missing details, {} ms", kind as u8, nodes.len(), with_detail, missing_checks, started.elapsed().as_millis());
             println!("  queue payload {} KB", raw.len() / 1024);
             assert_eq!(missing_checks, 0, "every PR gets its detail fields");
+            if matches!(kind, QueueKind::Mine) {
+                let ms_started = std::time::Instant::now();
+                let ids: Vec<String> = nodes.iter().filter_map(|node| node["id"].as_str().map(str::to_string)).collect();
+                let targets: Vec<CheckTarget> = nodes
+                    .iter()
+                    .filter(|node| {
+                        let st = node["commits"]["nodes"][0]["commit"]["statusCheckRollup"]["state"].as_str();
+                        st.is_some() && st != Some("SUCCESS")
+                    })
+                    .filter_map(|node| {
+                        Some(CheckTarget {
+                            id: node["id"].as_str()?.to_string(),
+                            repo: node["repository"]["nameWithOwner"].as_str()?.to_string(),
+                            base: node["stack"]["baseRefName"].as_str().or_else(|| node["baseRefName"].as_str())?.to_string(),
+                        })
+                    })
+                    .collect();
+                let target_count = targets.len();
+                let mut jobs = tokio::task::JoinSet::new();
+                for chunk in ids.chunks(12) {
+                    let batch = chunk.to_vec();
+                    jobs.spawn(async move { merge_states(batch).await });
+                }
+                for chunk in targets.chunks(25) {
+                    let batch = chunk.to_vec();
+                    jobs.spawn(async move { failing_checks(batch).await });
+                }
+                let mut ok_batches = 0;
+                while let Some(joined) = jobs.join_next().await {
+                    assert!(joined.unwrap().is_ok());
+                    ok_batches += 1;
+                }
+                println!("  mine merge_states ({} PRs) + failing_checks ({target_count} non-SUCCESS PRs) in {} ms ({ok_batches} batches)", ids.len(), ms_started.elapsed().as_millis());
+            }
             if let Some(first) = nodes.first() {
                 let repo = first["repository"]["nameWithOwner"].as_str().unwrap().to_string();
                 let number = first["number"].as_u64().unwrap();
@@ -933,6 +1291,36 @@ mod tests {
                 println!("  {repo}#{number}: body {} B, diff {} B, conversation ok={} in {} ms (parallel)", b.expect("body").len(), d.expect("diff").len(), c.is_ok(), started.elapsed().as_millis());
             }
         }
+    }
+
+    #[test]
+    fn parses_required_check_rules_from_branch_rulesets() {
+        let raw = r#"[
+            {"type":"pull_request","parameters":{}},
+            {"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"lint"},{"context":"unit"}]}}
+        ]"#;
+        let parsed = parse_required_check_rules(raw).expect("rules");
+        assert!(parsed.contains("lint"));
+        assert!(parsed.contains("unit"));
+        assert_eq!(parsed.len(), 2);
+        assert!(parse_required_check_rules("[]").is_none());
+    }
+
+    #[test]
+    fn fold_checks_dedupes_reruns_by_latest_timestamp_and_splits_required() {
+        let mut latest: std::collections::HashMap<String, LatestCheck> = std::collections::HashMap::new();
+        let req = ["unit".to_string(), "typecheck".to_string()].into_iter().collect();
+        let nodes = vec![
+            serde_json::json!({"__typename":"CheckRun","name":"unit","status":"COMPLETED","conclusion":"FAILURE","completedAt":"2026-11-01T10:00:00Z"}),
+            serde_json::json!({"__typename":"CheckRun","name":"unit","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-11-01T10:05:00Z"}),
+            serde_json::json!({"__typename":"CheckRun","name":"typecheck","status":"COMPLETED","conclusion":"FAILURE","completedAt":"2026-11-01T10:02:00Z"}),
+            serde_json::json!({"__typename":"CheckRun","name":"visual-regression","status":"COMPLETED","conclusion":"FAILURE","completedAt":"2026-11-01T10:02:00Z"}),
+            serde_json::json!({"__typename":"CheckRun","name":"lint","status":"IN_PROGRESS","conclusion":null,"startedAt":"2026-11-01T10:06:00Z"}),
+        ];
+        fold_check_nodes(&mut latest, &nodes, Some(&req));
+        let (failing_required, failing_optional) = summarize_checks(&latest);
+        assert_eq!(failing_required, vec!["typecheck".to_string()]);
+        assert_eq!(failing_optional, 1);
     }
 
     #[test]

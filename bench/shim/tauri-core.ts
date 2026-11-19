@@ -60,14 +60,20 @@ function mergeStateOf(pull: FixturePull): Record<string, unknown> {
   const conflicted = lateConflicts.has(pull.number) || (IS_DEMO ? DEMO_CONFLICTS.has(pull.id) : pull.number % 13 === 0);
   const failing = pull.commits.nodes[0]?.commit.statusCheckRollup?.state === 'FAILURE';
   const status = conflicted ? 'DIRTY' : pull.isDraft ? 'DRAFT' : failing ? 'UNSTABLE' : pull.reviewDecision === 'APPROVED' ? 'CLEAN' : 'BLOCKED';
+  return { id: pull.id, mergeable: conflicted ? 'CONFLICTING' : 'MERGEABLE', mergeStateStatus: status, reviewThreads: { nodes: threadsOf(pull).map(({ isResolved }) => ({ isResolved })) } };
+}
+
+function failingChecksOf(pull: FixturePull): { id: string; failingRequired: string[]; failingOptional: number } {
   const rollup = pull.commits.nodes[0]?.commit.statusCheckRollup?.state;
-  const checks = rollup === 'FAILURE' ? [{ __typename: 'CheckRun', name: 'unit', conclusion: 'FAILURE', isRequired: pull.number % 2 === 0 }, { __typename: 'CheckRun', name: 'preview-deploy', conclusion: 'CANCELLED', isRequired: false }] : [{ __typename: 'CheckRun', name: 'unit', conclusion: rollup === 'PENDING' ? null : 'SUCCESS', isRequired: true }];
-  return { id: pull.id, mergeable: conflicted ? 'CONFLICTING' : 'MERGEABLE', mergeStateStatus: status, commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: checks } } } }] }, reviewThreads: { nodes: threadsOf(pull).map(({ isResolved, isOutdated }) => ({ isResolved, isOutdated })) } };
+  if (rollup !== 'FAILURE') return { id: pull.id, failingRequired: [], failingOptional: 0 };
+  return { id: pull.id, failingRequired: pull.number % 2 === 0 ? ['unit'] : [], failingOptional: pull.number % 2 === 0 ? 1 : 2 };
 }
 
 const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   queue: () => JSON.stringify([{ data: { search: { nodes: pulls } } }]),
-  merge_states: (args) => JSON.stringify({ data: Object.fromEntries((args.ids as string[]).map((id, index) => [`p${index}`, byId.has(id) ? mergeStateOf(byId.get(id) as FixturePull) : null])) }),
+  merge_states: (args) => JSON.stringify({ data: { nodes: (args.ids as string[]).map((id) => (byId.has(id) ? mergeStateOf(byId.get(id) as FixturePull) : null)) } }),
+  merge_status_poll: (args) => JSON.stringify({ data: { nodes: (args.ids as string[]).map((id) => { const pull = byId.get(id); if (pull == null) return null; const state = mergeStateOf(pull); return { id: state.id, mergeable: state.mergeable, mergeStateStatus: state.mergeStateStatus }; }) } }),
+  failing_checks: (args) => JSON.stringify({ data: (args.pulls as { id: string }[]).map(({ id }) => (byId.has(id) ? failingChecksOf(byId.get(id) as FixturePull) : { id, failingRequired: [], failingOptional: 0 })) }),
   body: (args) => { const pull = byNumber.get(args.number as number) ?? pulls[0]!; const html = IS_DEMO ? demoBody(pull) : generateBody(pull); return WITH_IMAGES ? `${IMAGE_HTML(pull.number)}${html}${IMAGE_HTML(pull.number + 1)}` : html; },
   diff: (args) => { const pull = byNumber.get(args.number as number) ?? pulls[0]!; const base = (IS_DEMO ? demoDiff(pull) : null) ?? generateDiff(pull); return MIXED_FILES ? `${base}${mixedFiles(pull.number)}` : base; },
   conversation: (args) => IS_DEMO ? JSON.stringify(demoConversation(byNumber.get(args.number as number) ?? pulls[0]!)) : JSON.stringify({ data: { repository: { pullRequest: { comments: { totalCount: 2, nodes: [

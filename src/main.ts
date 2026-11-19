@@ -12,7 +12,7 @@ import { buildAgentPrompt, isConflicted, isFailing, isTriageCandidate, needsAtte
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
-import { approvePull, dequeuePull, closePull, commentOnPull, messageDevinSession, fetchViewerLogin, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchPull, fetchQueue, fetchStackNeighbors, type MergeState, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
+import { approvePull, dequeuePull, closePull, commentOnPull, messageDevinSession, fetchViewerLogin, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchPull, fetchQueue, fetchStackNeighbors, pollMergeStatuses, type MergeState, type MergeStateUpdate, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
 import { GroupedReview } from './grouped-review';
 import { groupWithAi } from './file-grouping-ai';
 import type { FileGrouping, PromptFile } from './file-groups';
@@ -1670,21 +1670,63 @@ async function scoreWithJev(pulls: PullRequest[]): Promise<void> {
   persistAiResults();
 }
 let mergeStateRenderFrame = 0;
+const mergeStateInFlight = new Set<string>();
+const saveQueueTimers = new Map<QueueKind, number>();
 
-function applyMergeStates(kind: QueueKind, states: MergeState[]): void {
+function scheduleSaveQueue(kind: QueueKind): void {
+  const existing = saveQueueTimers.get(kind);
+  if (existing != null) window.clearTimeout(existing);
+  saveQueueTimers.set(kind, window.setTimeout(() => {
+    saveQueueTimers.delete(kind);
+    const pulls = queueCache.get(kind);
+    if (pulls != null) saveQueue(kind, pulls);
+  }, 400));
+}
+
+function applyMergeStates(updates: MergeStateUpdate[]): void {
+  if (updates.length === 0) return;
+  const byId = new Map(updates.map((update) => [update.id, update]));
+  let activeChanged = false;
+  for (const [kind, pulls] of queueCache.entries()) {
+    let changed = false;
+    const updated = pulls.map((pull) => {
+      const update = byId.get(pull.id);
+      if (update == null) return pull;
+      changed = true;
+      const next: PullRequest = {
+        ...pull,
+        mergeable: update.mergeable ?? pull.mergeable,
+        mergeStateStatus: update.mergeStateStatus ?? pull.mergeStateStatus,
+        openThreads: update.openThreads ?? pull.openThreads,
+        failingRequired: update.failingRequired ?? pull.failingRequired,
+        failingOptional: update.failingOptional ?? pull.failingOptional,
+      };
+      if (next.mergeStateStatus !== 'UNKNOWN' && next.failingRequired != null) {
+        mergeStateCache.set(next.id, {
+          updatedAt: next.updatedAt,
+          fetchedAt: Date.now(),
+          state: {
+            id: next.id,
+            mergeable: next.mergeable,
+            mergeStateStatus: next.mergeStateStatus,
+            openThreads: next.openThreads ?? 0,
+            failingRequired: next.failingRequired,
+            failingOptional: next.failingOptional ?? 0,
+          },
+        });
+      }
+      return next;
+    });
+    if (!changed) continue;
+    queueCache.set(kind, updated);
+    scheduleSaveQueue(kind);
+    if (kind === state.kind) {
+      state.pulls = updated;
+      activeChanged = true;
+    }
+  }
+  if (!activeChanged) return;
   invalidateList();
-  const byId = new Map(states.map((mergeState) => [mergeState.id, mergeState]));
-  const pulls = queueCache.get(kind);
-  if (pulls == null) return;
-  const updated = pulls.map((pull) => {
-    const mergeState = byId.get(pull.id);
-    if (mergeState == null) return pull;
-    if (mergeState.mergeStateStatus !== 'UNKNOWN') mergeStateCache.set(pull.id, { updatedAt: pull.updatedAt, fetchedAt: Date.now(), state: mergeState });
-    return { ...pull, mergeable: mergeState.mergeable, mergeStateStatus: mergeState.mergeStateStatus, openThreads: mergeState.openThreads, failingRequired: mergeState.failingRequired, failingOptional: mergeState.failingOptional };
-  });
-  queueCache.set(kind, updated);
-  if (kind !== state.kind) return;
-  state.pulls = updated;
   cancelAnimationFrame(mergeStateRenderFrame);
   mergeStateRenderFrame = requestAnimationFrame(() => {
     renderList();
@@ -1699,18 +1741,39 @@ function applyMergeStates(kind: QueueKind, states: MergeState[]): void {
 
 const MERGE_STATE_RETRY_MS = [2_000, 5_000, 10_000, 20_000];
 
-async function loadMergeStates(kind: QueueKind, pulls: PullRequest[]): Promise<void> {
-  let pending = pulls.filter((pull) => cachedMergeState(pull) == null).map((pull) => pull.id);
+async function retryUnknownMergeStatuses(initialUnknown: string[]): Promise<void> {
+  let pending = initialUnknown;
   for (let attempt = 0; pending.length > 0; attempt += 1) {
-    const unknown: string[] = [];
-    await fetchMergeStates(pending, (states) => {
-      applyMergeStates(kind, states);
+    const delay = MERGE_STATE_RETRY_MS[attempt];
+    if (delay == null) return;
+    await new Promise((resolve) => window.setTimeout(resolve, delay));
+    const stillUnknown: string[] = [];
+    await pollMergeStatuses(pending, (states) => {
+      applyMergeStates(states);
+      stillUnknown.push(...states.filter((mergeState) => mergeState.mergeStateStatus === 'UNKNOWN').map((mergeState) => mergeState.id));
+    });
+    pending = stillUnknown;
+  }
+}
+
+/** Runs the initial merge-state + failing-checks pass (non-drafts first, deduped across tabs), then polls UNKNOWNs in the background. */
+async function loadMergeStates(pulls: PullRequest[]): Promise<void> {
+  const pendingPulls = pulls
+    .filter((pull) => cachedMergeState(pull) == null && !mergeStateInFlight.has(pull.id))
+    .sort((left, right) => Number(left.isDraft) - Number(right.isDraft));
+  if (pendingPulls.length === 0) return;
+  pendingPulls.forEach((pull) => mergeStateInFlight.add(pull.id));
+  const unknown: string[] = [];
+  try {
+    await fetchMergeStates(pendingPulls, (states) => {
+      applyMergeStates(states);
       unknown.push(...states.filter((mergeState) => mergeState.mergeStateStatus === 'UNKNOWN').map((mergeState) => mergeState.id));
     });
-    const delay = MERGE_STATE_RETRY_MS[attempt];
-    if (delay == null || unknown.length === 0) return;
-    await new Promise((resolve) => window.setTimeout(resolve, delay));
-    pending = unknown;
+  } finally {
+    pendingPulls.forEach((pull) => mergeStateInFlight.delete(pull.id));
+  }
+  if (unknown.length > 0) {
+    void retryUnknownMergeStatuses(unknown).catch((error: unknown) => console.warn('merge status retry failed', errorMessage(error)));
   }
 }
 
@@ -1732,8 +1795,25 @@ function restoreSavedQueues(): void {
     try {
       const saved = JSON.parse(localStorage.getItem(SAVED_QUEUE_KEY(kind)) ?? 'null') as { at: number; pulls: PullRequest[] } | null;
       if (saved == null || !Array.isArray(saved.pulls) || Date.now() - saved.at > SAVED_QUEUE_MAX_AGE_MS) return;
-      queueCache.set(kind, saved.pulls.map(withOptimisticQueue));
+      const restored = saved.pulls.map(withOptimisticQueue);
+      queueCache.set(kind, restored);
       savedQueueAt.set(kind, saved.at);
+      for (const pull of restored) {
+        if (pull.mergeStateStatus !== 'UNKNOWN' && pull.failingRequired != null && !mergeStateCache.has(pull.id)) {
+          mergeStateCache.set(pull.id, {
+            updatedAt: pull.updatedAt,
+            fetchedAt: saved.at,
+            state: {
+              id: pull.id,
+              mergeable: pull.mergeable,
+              mergeStateStatus: pull.mergeStateStatus,
+              openThreads: pull.openThreads ?? 0,
+              failingRequired: pull.failingRequired,
+              failingOptional: pull.failingOptional ?? 0,
+            },
+          });
+        }
+      }
     } catch {
       localStorage.removeItem(SAVED_QUEUE_KEY(kind));
     }
@@ -1805,6 +1885,8 @@ function manualRefresh(): void {
   });
 }
 
+const lastMergeStatesPass = new Map<QueueKind, Promise<void>>();
+
 function refresh(kind: QueueKind, isForced = false): Promise<void> {
   const running = inFlight.get(kind);
   if (running != null) return running;
@@ -1819,7 +1901,8 @@ function refresh(kind: QueueKind, isForced = false): Promise<void> {
       if (kind === state.kind) applyQueue(merged);
       if (kind === state.kind) void scoreWithJev(merged);
       if (kind === state.kind) void ensureGroups();
-      void loadMergeStates(kind, merged).catch((error: unknown) => console.warn('merge states failed', errorMessage(error)));
+      const mergePass = loadMergeStates(merged).catch((error: unknown) => console.warn('merge states failed', errorMessage(error)));
+      lastMergeStatesPass.set(kind, mergePass);
     })
     .catch((error: unknown) => {
       if (kind !== state.kind) return;
@@ -2432,8 +2515,7 @@ async function runMerge(pull: PullRequest, isQueued: boolean): Promise<string | 
 /** After a merge is refused, ask GitHub again so a conflict (or any other blocker) shows up right away instead of on a later refresh. */
 async function recheckMergeState(pull: PullRequest): Promise<void> {
   mergeStateCache.delete(pull.id);
-  const kind = state.kind;
-  await loadMergeStates(kind, [pull]).catch((error: unknown) => console.warn('merge state recheck failed', errorMessage(error)));
+  await loadMergeStates([pull]).catch((error: unknown) => console.warn('merge state recheck failed', errorMessage(error)));
   const fresh = state.pulls.find((candidate) => candidate.id === pull.id);
   if (fresh != null && isConflicted(fresh) && !isConflicted(pull)) toast(`#${pull.number} now has merge conflicts with ${pull.baseRefName}`, true);
 }
@@ -3679,9 +3761,21 @@ const checkForUpdates = startAutoUpdate({
 });
 let restartIntoUpdate: (() => void) | null = null;
 
+/** Load the active tab exclusively first so background tabs don't contend on the 12-slot GitHub pool or duplicate merge states. */
+async function refreshBootQueues(): Promise<void> {
+  const active = state.kind;
+  await refresh(active, true);
+  await (lastMergeStatesPass.get(active) ?? Promise.resolve());
+  const background = (['mine', 'review', 'involved'] satisfies QueueKind[]).filter((kind) => kind !== active);
+  for (const kind of background) {
+    await refresh(kind, true);
+    await (lastMergeStatesPass.get(kind) ?? Promise.resolve());
+  }
+}
+
 restoreSavedQueues();
 if (state.pulls.length === 0) renderBootSkeletons();
-(['mine', 'review', 'involved'] satisfies QueueKind[]).forEach((kind) => void refresh(kind, true));
+void refreshBootQueues();
 
 if (import.meta.env.VITE_PR_REVIEW_HARNESS === '1') {
   Object.assign(window, {
