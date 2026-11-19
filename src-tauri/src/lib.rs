@@ -302,11 +302,14 @@ async fn queue(kind: QueueKind) -> Result<String, String> {
     let mut details = tokio::task::JoinSet::new();
 
     // Fire newest-first and oldest-first page 1 in parallel: covers <=200 PRs in 1 search round-trip.
-    let (desc_raw, asc_raw) = tokio::join!(
-        graphql(&search, serde_json::json!({ "q": search_query(kind), "cursor": serde_json::Value::Null })),
-        graphql(&search, serde_json::json!({ "q": search_query_asc(kind), "cursor": serde_json::Value::Null })),
-    );
-    let first_page: serde_json::Value = serde_json::from_str(&desc_raw?).map_err(|error| format!("invalid search response: {error}"))?;
+    let asc_task = {
+        let query = search.clone();
+        let q = search_query_asc(kind);
+        tokio::spawn(async move { graphql(&query, serde_json::json!({ "q": q, "cursor": serde_json::Value::Null })).await })
+    };
+    let desc_raw = graphql(&search, serde_json::json!({ "q": search_query(kind), "cursor": serde_json::Value::Null })).await?;
+    let asc_raw = asc_task.await.ok().and_then(Result::ok);
+    let first_page: serde_json::Value = serde_json::from_str(&desc_raw).map_err(|error| format!("invalid search response: {error}"))?;
     let first_search = &first_page["data"]["search"];
     let issue_count = first_search["issueCount"].as_u64().unwrap_or(0) as usize;
     let mut cursor = first_search["pageInfo"]["endCursor"].as_str().map(str::to_string);
@@ -319,7 +322,7 @@ async fn queue(kind: QueueKind) -> Result<String, String> {
     spawn_detail_batches(&mut details, &detail, &first_nodes);
     desc_nodes.extend(first_nodes);
 
-    if let Ok(text) = asc_raw {
+    if let Some(text) = asc_raw {
         if let Ok(asc_page) = serde_json::from_str::<serde_json::Value>(&text) {
             // Reverse asc-only nodes so the merged list stays ordered updated-desc.
             let extra: Vec<serde_json::Value> = extract_search_nodes(&asc_page)
