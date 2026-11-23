@@ -12,7 +12,8 @@ import { buildAgentPrompt, isConflicted, isFailing, isTriageCandidate, needsAtte
 import { applyThemeColors, SYSTEM_THEME_ID, THEMES, themeById, type AppTheme } from './themes';
 import { ThemePicker } from './theme-picker';
 import './styles.css';
-import { approvePull, dequeuePull, closePull, commentOnPull, messageDevinSession, fetchViewerLogin, usesMergeQueue, fetchBody, fetchDiff, fetchMergeStates, fetchPull, fetchQueue, fetchStackNeighbors, pollMergeStatuses, type MergeState, type MergeStateUpdate, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
+import { approvePull, dequeuePull, closePull, commentOnPull, messageDevinSession, fetchViewerLogin, usesMergeQueue, fetchDiff, fetchMergeStates, fetchPull, fetchQueue, fetchStackNeighbors, pollMergeStatuses, type MergeState, type MergeStateUpdate, mergePull, openInBrowser, type MergeMethod, type PullRequest, type QueueKind } from './github';
+import { diffCacheKey, invalidatePullDetails, loadPullDetails } from './pull-details';
 import { GroupedReview } from './grouped-review';
 import { groupWithAi } from './file-grouping-ai';
 import type { FileGrouping, PromptFile } from './file-groups';
@@ -222,31 +223,15 @@ function relativeTime(iso: string): string {
   return days < 30 ? `${days}d` : `${Math.round(days / 30)}mo`;
 }
 
-function diffKey(pull: PullRequest): string {
-  return `${pull.id}:${pull.updatedAt}`;
-}
-
-const bodyCache = new Map<string, Promise<string>>();
-
 function loadBody(pull: PullRequest, isPriority = false): Promise<string> {
-  const key = diffKey(pull);
-  const cached = bodyCache.get(key);
-  if (cached != null) {
-    void cached.then((html) => preloadImages(imageUrlsInHtml(html), isPriority), () => undefined);
-    return cached;
-  }
-  const pending = fetchBody(pull).then((html) => {
-    preloadImages(imageUrlsInHtml(html), isPriority);
-    return html;
+  return loadPullDetails(pull).then((details) => {
+    preloadImages(imageUrlsInHtml(details.bodyHtml), isPriority);
+    return details.bodyHtml;
   });
-  pending.catch(() => bodyCache.delete(key));
-  bodyCache.set(key, pending);
-  if (bodyCache.size > DIFF_CACHE_LIMIT) bodyCache.delete(bodyCache.keys().next().value ?? '');
-  return pending;
 }
 
 function loadDiff(pull: PullRequest): Promise<ParsedFile[]> {
-  const key = diffKey(pull);
+  const key = diffCacheKey(pull);
   const cached = diffCache.get(key);
   if (cached != null) return cached;
   const pending = fetchDiff(pull).then(
@@ -1296,6 +1281,7 @@ function renderDetail(pull: PullRequest): void {
     diffView.setHeader(description);
   }
   const token = renderToken;
+  void refreshThreads(pull, description, token);
   void loadConversation(pull).then(
     (items) => {
       if (token !== renderToken) return;
@@ -1308,7 +1294,6 @@ function renderDetail(pull: PullRequest): void {
         adoptImages([previousList], [list]);
         list.classList.remove('fade-in');
       }
-      void refreshThreads(pull, description, token);
       section.addEventListener('click', (event) => {
         if ((event.target as HTMLElement).closest('[data-toggle-bots]') == null) return;
         showBotComments = !showBotComments;
@@ -1939,20 +1924,19 @@ function refreshSelectedInPlace(pull: PullRequest): void {
   renderDetailMeta(pull);
   syncQueueState(pull);
   const token = renderToken;
-  bodyCache.delete(diffKey(pull));
-  void loadBody(pull).then((bodyHtml) => {
+  invalidatePullDetails(pull);
+  void loadPullDetails(pull).then((details) => {
     if (token !== renderToken || state.selectedId !== pull.id) return;
+    preloadImages(imageUrlsInHtml(details.bodyHtml), true);
     const target = dom.descPane.querySelector('.description .markdown');
-    if (target == null) return;
-    const next = descriptionHtml(bodyHtml);
-    if (target.getAttribute('data-body') === next) return;
-    patchHtml(target, next);
-  }, () => undefined);
-  invalidateConversation(pull);
-  void loadConversation(pull).then((items) => {
-    if (token !== renderToken || state.selectedId !== pull.id) return;
+    if (target != null) {
+      const next = descriptionHtml(details.bodyHtml);
+      if (target.getAttribute('data-body') !== next) patchHtml(target, next);
+    }
     const section = dom.descPane.querySelector('[data-conversation]');
-    if (section != null) renderConversation(section, items);
+    if (section != null) renderConversation(section, details.conversation);
+    const threadsSection = dom.descPane.querySelector<HTMLElement>('[data-threads]');
+    if (threadsSection != null) renderThreads(threadsSection, details.threads);
   }, () => undefined);
 }
 
@@ -3592,6 +3576,29 @@ document.addEventListener('keydown', (event) => {
   }
   if (!isTyping && handleSequence(event)) return;
   commands.handle(event, isTyping);
+});
+
+const HOVER_PREFETCH_MS = 150;
+let hoverPrefetchTimer: number | undefined;
+let hoverPrefetchId: string | null = null;
+
+dom.list.addEventListener('pointerover', (event) => {
+  const rowId = (event.target as HTMLElement).closest<HTMLElement>('li[data-id]')?.dataset.id ?? null;
+  if (rowId === hoverPrefetchId) return;
+  hoverPrefetchId = rowId;
+  window.clearTimeout(hoverPrefetchTimer);
+  if (rowId == null || rowId === state.selectedId) return;
+  hoverPrefetchTimer = window.setTimeout(() => {
+    const pull = pullById(rowId);
+    if (pull == null || state.selectedId === rowId) return;
+    void loadDiff(pull).catch(() => undefined);
+    void loadPullDetails(pull).catch(() => undefined);
+  }, HOVER_PREFETCH_MS);
+});
+
+dom.list.addEventListener('pointerleave', () => {
+  hoverPrefetchId = null;
+  window.clearTimeout(hoverPrefetchTimer);
 });
 
 dom.list.addEventListener('click', (event) => {

@@ -74,6 +74,25 @@ const handlers: Record<string, (args: Record<string, unknown>) => unknown> = {
   merge_states: (args) => JSON.stringify({ data: { nodes: (args.ids as string[]).map((id) => (byId.has(id) ? mergeStateOf(byId.get(id) as FixturePull) : null)) } }),
   merge_status_poll: (args) => JSON.stringify({ data: { nodes: (args.ids as string[]).map((id) => { const pull = byId.get(id); if (pull == null) return null; const state = mergeStateOf(pull); return { id: state.id, mergeable: state.mergeable, mergeStateStatus: state.mergeStateStatus }; }) } }),
   failing_checks: (args) => JSON.stringify({ data: (args.pulls as { id: string }[]).map(({ id }) => (byId.has(id) ? failingChecksOf(byId.get(id) as FixturePull) : { id, failingRequired: [], failingOptional: 0 })) }),
+  pull_details: (args) => {
+    const pull = byNumber.get(args.number as number) ?? pulls[0]!;
+    const bodyHTML = IS_DEMO ? demoBody(pull) : generateBody(pull);
+    const fullBody = WITH_IMAGES ? `${IMAGE_HTML(pull.number)}${bodyHTML}${IMAGE_HTML(pull.number + 1)}` : bodyHTML;
+    const conv = IS_DEMO
+      ? demoConversation(pull).data.repository.pullRequest
+      : {
+          comments: {
+            totalCount: 3,
+            nodes: [
+              { id: 'c1', bodyHTML: `<p>Long review note.</p>${'<p>Line of detail that goes on for a while to make this comment tall.</p>'.repeat(30)}`, createdAt: '2026-09-26T10:00:00Z', url: 'https://github.com/o/web/pull/1#c1', author: { login: 'reviewer', avatarUrl: '', __typename: 'User' } },
+              { id: 'c3', bodyHTML: '<h3>🚀 Web Preview Deployed</h3><p><a href="https://pr-47520.preview.openrouter.ai">https://pr-47520.preview.openrouter.ai</a></p>', createdAt: '2026-09-26T11:30:00Z', url: 'https://github.com/o/web/pull/1#c3', author: { login: 'github-actions', avatarUrl: '', __typename: 'Bot' } },
+              { id: 'c2', bodyHTML: '<p>Link to Devin session: <a href="https://openrouter.devinenterprise.com/sessions/38cc6d851fef40258406d2df3132a5c1">session</a></p>', createdAt: '2026-09-26T11:00:00Z', url: 'https://github.com/o/web/pull/1#c2', author: { login: 'devin-ai-integration', avatarUrl: '', __typename: 'Bot' } },
+            ],
+          },
+          reviews: { totalCount: 0, nodes: [] },
+        };
+    return JSON.stringify({ data: { repository: { pullRequest: { bodyHTML: fullBody, ...conv, reviewThreads: { nodes: threadsOf(pull) } } } } });
+  },
   body: (args) => { const pull = byNumber.get(args.number as number) ?? pulls[0]!; const html = IS_DEMO ? demoBody(pull) : generateBody(pull); return WITH_IMAGES ? `${IMAGE_HTML(pull.number)}${html}${IMAGE_HTML(pull.number + 1)}` : html; },
   diff: (args) => { const pull = byNumber.get(args.number as number) ?? pulls[0]!; const base = (IS_DEMO ? demoDiff(pull) : null) ?? generateDiff(pull); return MIXED_FILES ? `${base}${mixedFiles(pull.number)}` : base; },
   conversation: (args) => IS_DEMO ? JSON.stringify(demoConversation(byNumber.get(args.number as number) ?? pulls[0]!)) : JSON.stringify({ data: { repository: { pullRequest: { comments: { totalCount: 2, nodes: [

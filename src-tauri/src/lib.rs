@@ -8,7 +8,7 @@ const QUEUE_FIELDS: &str = r#"
 ... on PullRequest {
   id number title url isDraft
   createdAt updatedAt additions deletions changedFiles
-  headRefName baseRefName reviewDecision
+  headRefName headRefOid baseRefName reviewDecision
   mergeQueueEntry { position state }
   author { login avatarUrl }
   repository { nameWithOwner }
@@ -18,11 +18,11 @@ const QUEUE_FIELDS: &str = r#"
 }"#;
 
 /// What `search` returns cheaply (~1.2 s per 100). Diff size, review decision, checks, queue and stack are what make a
-/// search page take 8-14 s and 502 on big queues, so those come from `QUEUE_DETAIL_FIELDS` in parallel `nodes` batches.
+/// search page take 8-14 s and 502 on big queues, so those come from parallel `nodes` batches instead.
 const QUEUE_SEARCH_FIELDS: &str = r#"
 ... on PullRequest {
   id number title url isDraft
-  createdAt updatedAt headRefName baseRefName
+  createdAt updatedAt headRefName headRefOid baseRefName
   author { login avatarUrl }
   repository { nameWithOwner }
 }"#;
@@ -36,8 +36,20 @@ const QUEUE_DETAIL_FIELDS: &str = r#"
   stack { baseRefName entries(first: 100) { nodes { position pullRequest { state } } } }
 }"#;
 
+/// Only the two fields that can change without bumping `updatedAt` (a CI check finishing or a merge-queue move).
+/// Unchanged PRs on refresh fetch just this in larger batches instead of re-reading diff size and review decision.
+const QUEUE_LIVE_FIELDS: &str = r#"
+... on PullRequest {
+  id mergeQueueEntry { position state }
+  commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
+}"#;
+
 /// PRs per detail request: 16 fills the 12-slot pool cleanly on ~130-PR queues without hitting search-style 502s.
 const QUEUE_DETAIL_BATCH: usize = 16;
+const QUEUE_LIVE_BATCH: usize = 50;
+const QUEUE_DETAIL_CACHE_LIMIT: usize = 2_000;
+const ETAG_CACHE_LIMIT: usize = 64;
+const ETAG_MAX_BODY_BYTES: usize = 2_000_000;
 
 const MAX_MERGE_STATE_IDS: usize = 25;
 const MAX_CHECK_TARGETS: usize = 25;
@@ -136,8 +148,61 @@ enum Method {
     Patch,
 }
 
+struct EtagEntry {
+    etag: String,
+    body: String,
+    link: Option<String>,
+    last_used: std::time::Instant,
+}
+
+static ETAG_CACHE: tokio::sync::Mutex<Option<std::collections::HashMap<String, EtagEntry>>> = tokio::sync::Mutex::const_new(None);
+
+fn etag_cache_key(path: &str, accept: Option<&str>) -> String {
+    format!("{}\0{}", path.trim_start_matches('/'), accept.unwrap_or("application/vnd.github+json"))
+}
+
+fn etag_store(cache: &mut std::collections::HashMap<String, EtagEntry>, key: String, etag: String, body: String, link: Option<String>) {
+    if body.len() > ETAG_MAX_BODY_BYTES {
+        return;
+    }
+    if cache.len() >= ETAG_CACHE_LIMIT && !cache.contains_key(&key) {
+        if let Some(oldest) = cache.iter().min_by_key(|(_, entry)| entry.last_used).map(|(k, _)| k.clone()) {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(key, EtagEntry { etag, body, link, last_used: std::time::Instant::now() });
+}
+
+/// Parses `page=N` from a GitHub `Link: <...page=N>; rel="last"` header for parallel REST pagination.
+fn parse_last_page(link_header: &str) -> Option<usize> {
+    for part in link_header.split(',') {
+        if !part.contains("rel=\"last\"") {
+            continue;
+        }
+        let url = part.split(';').next()?.trim().trim_start_matches('<').trim_end_matches('>');
+        let query = url.split_once('?')?.1;
+        for pair in query.split('&') {
+            if let Some(value) = pair.strip_prefix("page=") {
+                if let Ok(page) = value.parse::<usize>() {
+                    return Some(page);
+                }
+            }
+        }
+    }
+    None
+}
+
+struct GithubResponse {
+    body: String,
+    link: Option<String>,
+}
+
 /// One GitHub API call with gh's token. Reads retry gateway timeouts and dropped connections; writes never retry.
 async fn github(method: Method, path: &str, body: Option<serde_json::Value>, accept: Option<&str>) -> Result<String, String> {
+    github_response(method, path, body, accept).await.map(|response| response.body)
+}
+
+async fn github_response(method: Method, path: &str, body: Option<serde_json::Value>, accept: Option<&str>) -> Result<GithubResponse, String> {
     let is_read = method == Method::Get || body.as_ref().is_some_and(|value| value["query"].as_str().is_some_and(|query| !query.trim_start().starts_with("mutation")));
     let mut attempt = 0;
     let mut refreshed_token = false;
@@ -157,7 +222,7 @@ async fn github(method: Method, path: &str, body: Option<serde_json::Value>, acc
                 attempt += 1;
             }
             Err(error) => return Err(error.into_message()),
-            Ok(text) => return Ok(text),
+            Ok(response) => return Ok(response),
         }
     }
 }
@@ -177,9 +242,16 @@ impl GithubError {
     }
 }
 
-async fn github_once(method: Method, path: &str, body: Option<&serde_json::Value>, accept: Option<&str>) -> Result<String, GithubError> {
+async fn github_once(method: Method, path: &str, body: Option<&serde_json::Value>, accept: Option<&str>) -> Result<GithubResponse, GithubError> {
     let token = github_token().await.map_err(GithubError::Fatal)?;
-    let url = format!("{GITHUB_API}/{}", path.trim_start_matches('/'));
+    let trimmed_path = path.trim_start_matches('/');
+    let url = format!("{GITHUB_API}/{trimmed_path}");
+    let cache_key = (method == Method::Get).then(|| etag_cache_key(trimmed_path, accept));
+    let cached_etag = if let Some(key) = cache_key.as_deref() {
+        ETAG_CACHE.lock().await.as_ref().and_then(|cache| cache.get(key).map(|entry| entry.etag.clone()))
+    } else {
+        None
+    };
     let builder = match method {
         Method::Get => github_client().get(&url),
         Method::Post => github_client().post(&url),
@@ -190,6 +262,9 @@ async fn github_once(method: Method, path: &str, body: Option<&serde_json::Value
         .bearer_auth(token)
         .header("X-GitHub-Api-Version", "2022-11-28")
         .header("Accept", accept.unwrap_or("application/vnd.github+json"));
+    if let Some(etag) = cached_etag {
+        request = request.header("If-None-Match", etag);
+    }
     if let Some(body) = body {
         request = request.header("Content-Type", "application/json").body(body.to_string());
     }
@@ -199,9 +274,30 @@ async fn github_once(method: Method, path: &str, body: Option<&serde_json::Value
         if is_transient { GithubError::Retryable(message) } else { GithubError::Fatal(message) }
     })?;
     let status = response.status();
+    if status.as_u16() == 304 {
+        if let Some(key) = cache_key.as_deref() {
+            let mut guard = ETAG_CACHE.lock().await;
+            if let Some(entry) = guard.as_mut().and_then(|cache| cache.get_mut(key)) {
+                entry.last_used = std::time::Instant::now();
+                return Ok(GithubResponse { body: entry.body.clone(), link: entry.link.clone() });
+            }
+        }
+    }
+    let etag = response.headers().get("etag").and_then(|value| value.to_str().ok()).map(str::to_string);
+    let link = response.headers().get("link").and_then(|value| value.to_str().ok()).map(str::to_string);
     let text = response.text().await.map_err(|error| GithubError::Retryable(error.without_url().to_string()))?;
     if status.is_success() {
-        return graphql_errors_only(&text).map_or(Ok(text), |message| Err(classify_graphql_error(message)));
+        if trimmed_path == "graphql" {
+            if let Some(message) = graphql_errors_only(&text) {
+                return Err(classify_graphql_error(message));
+            }
+        }
+        if let (Some(key), Some(etag)) = (cache_key, etag) {
+            let mut guard = ETAG_CACHE.lock().await;
+            let cache = guard.get_or_insert_with(std::collections::HashMap::new);
+            etag_store(cache, key, etag, text.clone(), link.clone());
+        }
+        return Ok(GithubResponse { body: text, link });
     }
     let detail = serde_json::from_str::<serde_json::Value>(&text)
         .ok()
@@ -282,11 +378,67 @@ fn extract_search_nodes(page: &serde_json::Value) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn spawn_detail_batches(details: &mut tokio::task::JoinSet<Result<String, String>>, detail_query: &str, nodes: &[serde_json::Value]) {
-    let ids: Vec<String> = nodes.iter().filter_map(|node| node["id"].as_str().map(str::to_string)).collect();
-    for batch in ids.chunks(QUEUE_DETAIL_BATCH) {
+#[derive(Clone)]
+struct CachedPullDetail {
+    updated_at: String,
+    head_ref_oid: String,
+    base_ref_name: String,
+    has_stack: bool,
+    fields: serde_json::Map<String, serde_json::Value>,
+}
+
+static QUEUE_DETAIL_CACHE: tokio::sync::Mutex<Option<std::collections::HashMap<String, CachedPullDetail>>> = tokio::sync::Mutex::const_new(None);
+
+const STATIC_DETAIL_KEYS: [&str; 6] = ["additions", "deletions", "changedFiles", "reviewDecision", "stackEntry", "stack"];
+
+/// Splits search nodes into PRs needing full detail hydration vs unchanged non-stacked PRs that only need live queue/check state.
+fn partition_for_hydration(
+    cache: &std::collections::HashMap<String, CachedPullDetail>,
+    nodes: &[serde_json::Value],
+) -> (Vec<String>, Vec<String>) {
+    let mut full_ids = Vec::new();
+    let mut live_ids = Vec::new();
+    for node in nodes {
+        let Some(id) = node["id"].as_str() else { continue };
+        let updated_at = node["updatedAt"].as_str().unwrap_or("");
+        let head_ref_oid = node["headRefOid"].as_str().unwrap_or("");
+        let base_ref_name = node["baseRefName"].as_str().unwrap_or("");
+        let reusable = cache.get(id).is_some_and(|cached| {
+            !cached.has_stack
+                && cached.updated_at == updated_at
+                && !head_ref_oid.is_empty()
+                && cached.head_ref_oid == head_ref_oid
+                && cached.base_ref_name == base_ref_name
+        });
+        if reusable {
+            live_ids.push(id.to_string());
+        } else {
+            full_ids.push(id.to_string());
+        }
+    }
+    (full_ids, live_ids)
+}
+
+async fn spawn_detail_batches(
+    details: &mut tokio::task::JoinSet<(bool, Result<String, String>)>,
+    detail_query: &str,
+    live_query: &str,
+    nodes: &[serde_json::Value],
+) {
+    let (full_ids, live_ids) = {
+        let guard = QUEUE_DETAIL_CACHE.lock().await;
+        match guard.as_ref() {
+            Some(cache) => partition_for_hydration(cache, nodes),
+            None => (nodes.iter().filter_map(|node| node["id"].as_str().map(str::to_string)).collect(), Vec::new()),
+        }
+    };
+    for batch in full_ids.chunks(QUEUE_DETAIL_BATCH) {
         let (query, ids) = (detail_query.to_string(), batch.to_vec());
-        details.spawn(async move { graphql(&query, serde_json::json!({ "ids": ids })).await });
+        details.spawn(async move { (true, graphql(&query, serde_json::json!({ "ids": ids })).await) });
+    }
+    for batch in live_ids.chunks(QUEUE_LIVE_BATCH) {
+        let (query, ids) = (live_query.to_string(), batch.to_vec());
+        details.spawn(async move { (false, graphql(&query, serde_json::json!({ "ids": ids })).await) });
     }
 }
 
@@ -296,10 +448,11 @@ async fn queue(kind: QueueKind) -> Result<String, String> {
         "query($q: String!, $cursor: String) {{ search(query: $q, type: ISSUE, first: {QUEUE_PAGE_SIZE}, after: $cursor) {{ issueCount pageInfo {{ hasNextPage endCursor }} nodes {{ {QUEUE_SEARCH_FIELDS} }} }} }}"
     );
     let detail = format!("query($ids: [ID!]!) {{ nodes(ids: $ids) {{ {QUEUE_DETAIL_FIELDS} }} }}");
+    let live = format!("query($ids: [ID!]!) {{ nodes(ids: $ids) {{ {QUEUE_LIVE_FIELDS} }} }}");
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut desc_nodes: Vec<serde_json::Value> = Vec::new();
     let mut asc_tail: Vec<serde_json::Value> = Vec::new();
-    let mut details = tokio::task::JoinSet::new();
+    let mut details: tokio::task::JoinSet<(bool, Result<String, String>)> = tokio::task::JoinSet::new();
 
     // Fire newest-first and oldest-first page 1 in parallel: covers <=200 PRs in 1 search round-trip.
     let asc_task = {
@@ -308,7 +461,6 @@ async fn queue(kind: QueueKind) -> Result<String, String> {
         tokio::spawn(async move { graphql(&query, serde_json::json!({ "q": q, "cursor": serde_json::Value::Null })).await })
     };
     let desc_raw = graphql(&search, serde_json::json!({ "q": search_query(kind), "cursor": serde_json::Value::Null })).await?;
-    let asc_raw = asc_task.await.ok().and_then(Result::ok);
     let first_page: serde_json::Value = serde_json::from_str(&desc_raw).map_err(|error| format!("invalid search response: {error}"))?;
     let first_search = &first_page["data"]["search"];
     let issue_count = first_search["issueCount"].as_u64().unwrap_or(0) as usize;
@@ -319,20 +471,24 @@ async fn queue(kind: QueueKind) -> Result<String, String> {
         .into_iter()
         .filter(|node| node["id"].as_str().is_some_and(|id| seen.insert(id.to_string())))
         .collect();
-    spawn_detail_batches(&mut details, &detail, &first_nodes);
+    spawn_detail_batches(&mut details, &detail, &live, &first_nodes).await;
     desc_nodes.extend(first_nodes);
 
-    if let Some(text) = asc_raw {
-        if let Ok(asc_page) = serde_json::from_str::<serde_json::Value>(&text) {
-            // Reverse asc-only nodes so the merged list stays ordered updated-desc.
-            let extra: Vec<serde_json::Value> = extract_search_nodes(&asc_page)
-                .into_iter()
-                .rev()
-                .filter(|node| node["id"].as_str().is_some_and(|id| seen.insert(id.to_string())))
-                .collect();
-            spawn_detail_batches(&mut details, &detail, &extra);
-            asc_tail = extra;
+    if has_next {
+        if let Some(text) = asc_task.await.ok().and_then(Result::ok) {
+            if let Ok(asc_page) = serde_json::from_str::<serde_json::Value>(&text) {
+                // Reverse asc-only nodes so the merged list stays ordered updated-desc.
+                let extra: Vec<serde_json::Value> = extract_search_nodes(&asc_page)
+                    .into_iter()
+                    .rev()
+                    .filter(|node| node["id"].as_str().is_some_and(|id| seen.insert(id.to_string())))
+                    .collect();
+                spawn_detail_batches(&mut details, &detail, &live, &extra).await;
+                asc_tail = extra;
+            }
         }
+    } else {
+        asc_task.abort();
     }
 
     // Only paginate the middle gap when more than 200 PRs exist (or if the asc fetch failed).
@@ -347,7 +503,7 @@ async fn queue(kind: QueueKind) -> Result<String, String> {
         if fresh.is_empty() {
             break;
         }
-        spawn_detail_batches(&mut details, &detail, &fresh);
+        spawn_detail_batches(&mut details, &detail, &live, &fresh).await;
         desc_nodes.extend(fresh);
         cursor = result["pageInfo"]["endCursor"].as_str().map(str::to_string);
         has_next = result["pageInfo"]["hasNextPage"].as_bool() == Some(true);
@@ -355,40 +511,99 @@ async fn queue(kind: QueueKind) -> Result<String, String> {
 
     desc_nodes.extend(asc_tail);
 
-    let mut by_id: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
+    let search_meta: std::collections::HashMap<String, (String, String, String)> = desc_nodes
+        .iter()
+        .filter_map(|node| {
+            Some((
+                node["id"].as_str()?.to_string(),
+                (
+                    node["updatedAt"].as_str().unwrap_or("").to_string(),
+                    node["headRefOid"].as_str().unwrap_or("").to_string(),
+                    node["baseRefName"].as_str().unwrap_or("").to_string(),
+                ),
+            ))
+        })
+        .collect();
+
+    let mut by_id: std::collections::HashMap<String, serde_json::Map<String, serde_json::Value>> = std::collections::HashMap::new();
+    let mut fresh_static: Vec<(String, serde_json::Map<String, serde_json::Value>, bool)> = Vec::new();
     let mut failures = 0;
     while let Some(joined) = details.join_next().await {
-        let Ok(Ok(text)) = joined else {
+        let Ok((is_full, Ok(text))) = joined else {
             failures += 1;
             continue;
         };
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
         for node in parsed["data"]["nodes"].as_array().into_iter().flatten() {
-            if let Some(id) = node["id"].as_str() {
-                by_id.insert(id.to_string(), node.clone());
+            let Some(obj) = node.as_object() else { continue };
+            let Some(id) = obj.get("id").and_then(serde_json::Value::as_str) else { continue };
+            if is_full {
+                let mut static_fields = serde_json::Map::new();
+                for key in STATIC_DETAIL_KEYS {
+                    if let Some(value) = obj.get(key) {
+                        static_fields.insert(key.to_string(), value.clone());
+                    }
+                }
+                let has_stack = obj.get("stack").is_some_and(|value| !value.is_null());
+                fresh_static.push((id.to_string(), static_fields, has_stack));
             }
+            by_id.entry(id.to_string()).or_default().extend(obj.clone());
         }
     }
     if failures > 0 {
         eprintln!("[github] queue: {failures} detail batch(es) failed after retries; those rows show without checks or size");
     }
+
+    // Store newly fetched static detail fields and fill in cached static fields for live-only rows.
+    let cached_snapshot: std::collections::HashMap<String, serde_json::Map<String, serde_json::Value>> = {
+        let mut guard = QUEUE_DETAIL_CACHE.lock().await;
+        let cache = guard.get_or_insert_with(std::collections::HashMap::new);
+        for (id, fields, has_stack) in fresh_static {
+            if let Some((updated_at, head_ref_oid, base_ref_name)) = search_meta.get(&id) {
+                cache.insert(
+                    id,
+                    CachedPullDetail {
+                        updated_at: updated_at.clone(),
+                        head_ref_oid: head_ref_oid.clone(),
+                        base_ref_name: base_ref_name.clone(),
+                        has_stack,
+                        fields,
+                    },
+                );
+            }
+        }
+        if cache.len() > QUEUE_DETAIL_CACHE_LIMIT {
+            cache.retain(|id, _| search_meta.contains_key(id));
+        }
+        desc_nodes
+            .iter()
+            .filter_map(|node| {
+                let id = node["id"].as_str()?;
+                Some((id.to_string(), cache.get(id)?.fields.clone()))
+            })
+            .collect()
+    };
+
     let merged: Vec<serde_json::Value> = desc_nodes
         .into_iter()
         .map(|mut node| {
-            let extra = node_detail(&by_id, &node);
-            if let (Some(target), Some(extra)) = (node.as_object_mut(), extra) {
-                for (key, value) in extra {
-                    target.insert(key, value);
+            let id = node["id"].as_str().map(str::to_string);
+            if let (Some(target), Some(id)) = (node.as_object_mut(), id) {
+                if let Some(static_fields) = cached_snapshot.get(&id) {
+                    for (key, value) in static_fields {
+                        target.insert(key.clone(), value.clone());
+                    }
+                }
+                if let Some(extra) = by_id.get(&id) {
+                    for (key, value) in extra {
+                        target.insert(key.clone(), value.clone());
+                    }
                 }
             }
             node
         })
         .collect();
     Ok(serde_json::json!([{ "data": { "search": { "nodes": merged } } }]).to_string())
-}
-
-fn node_detail(by_id: &std::collections::HashMap<String, serde_json::Value>, node: &serde_json::Value) -> Option<serde_json::Map<String, serde_json::Value>> {
-    by_id.get(node["id"].as_str()?)?.as_object().cloned()
 }
 
 fn is_node_id(id: &str) -> bool {
@@ -737,6 +952,15 @@ async fn reply_to_thread(thread_id: String, body: String) -> Result<String, Stri
     graphql_mutation(query, serde_json::json!({ "id": thread_id, "body": body })).await
 }
 
+/// Fetches description, conversation and review threads in a single GraphQL round-trip when opening or prefetching a PR.
+#[tauri::command]
+async fn pull_details(repo: String, number: u64) -> Result<String, String> {
+    validate_repo(&repo)?;
+    let (owner, name) = repo.split_once('/').ok_or("invalid repository")?;
+    let query = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { bodyHTML comments(last: 50) { totalCount nodes { id bodyHTML createdAt url author { login avatarUrl __typename } } } reviews(last: 30) { totalCount nodes { id state bodyHTML submittedAt url author { login avatarUrl __typename } comments { totalCount } } } reviewThreads(first: 100) { nodes { id isResolved isOutdated path line originalLine diffSide viewerCanResolve comments(first: 30) { totalCount nodes { id bodyHTML createdAt url author { login avatarUrl __typename } } } } } } } }";
+    graphql(query, serde_json::json!({ "owner": owner, "name": name, "number": number })).await
+}
+
 #[tauri::command]
 async fn conversation(repo: String, number: u64) -> Result<String, String> {
     validate_repo(&repo)?;
@@ -769,15 +993,39 @@ async fn diff(repo: String, number: u64) -> Result<String, String> {
 }
 
 async fn diff_from_files(repo: &str, number: u64) -> Result<String, String> {
-    let mut files: Vec<PullFile> = Vec::new();
-    // GitHub lists at most 3000 files, 100 per page.
-    for page in 1..=30 {
-        let raw = github(Method::Get, &format!("repos/{repo}/pulls/{number}/files?per_page=100&page={page}"), None, None).await?;
-        let batch: Vec<PullFile> = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
-        let is_last = batch.len() < 100;
-        files.extend(batch);
-        if is_last {
-            break;
+    let first = github_response(Method::Get, &format!("repos/{repo}/pulls/{number}/files?per_page=100&page=1"), None, None).await?;
+    let mut files: Vec<PullFile> = serde_json::from_str(&first.body).map_err(|error| error.to_string())?;
+    // GitHub lists at most 3000 files (30 pages of 100). When `Link: rel="last"` is present, fetch pages 2..=last in parallel.
+    if files.len() == 100 {
+        if let Some(last) = first.link.as_deref().and_then(parse_last_page).map(|page| page.min(30)) {
+            let mut jobs = tokio::task::JoinSet::new();
+            for page in 2..=last {
+                let path = format!("repos/{repo}/pulls/{number}/files?per_page=100&page={page}");
+                jobs.spawn(async move {
+                    let raw = github(Method::Get, &path, None, None).await?;
+                    let batch: Vec<PullFile> = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+                    Ok::<(usize, Vec<PullFile>), String>((page, batch))
+                });
+            }
+            let mut rest: Vec<(usize, Vec<PullFile>)> = Vec::with_capacity(last.saturating_sub(1));
+            while let Some(joined) = jobs.join_next().await {
+                let (page, batch) = joined.map_err(|error| error.to_string())??;
+                rest.push((page, batch));
+            }
+            rest.sort_by_key(|(page, _)| *page);
+            for (_, batch) in rest {
+                files.extend(batch);
+            }
+        } else {
+            for page in 2..=30 {
+                let raw = github(Method::Get, &format!("repos/{repo}/pulls/{number}/files?per_page=100&page={page}"), None, None).await?;
+                let batch: Vec<PullFile> = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+                let is_last = batch.len() < 100;
+                files.extend(batch);
+                if is_last {
+                    break;
+                }
+            }
         }
     }
     let patch = files
@@ -1224,7 +1472,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .invoke_handler(tauri::generate_handler![queue, pull, stack_neighbors, viewer, comment, message_devin, threads, dequeue, set_thread_resolved, reply_to_thread, merge_queue, merge_states, merge_status_poll, failing_checks, conversation, body, diff, approve, merge, close, open_in_browser, review_context, readiness_available, readiness, group_files])
+        .invoke_handler(tauri::generate_handler![queue, pull, pull_details, stack_neighbors, viewer, comment, message_devin, threads, dequeue, set_thread_resolved, reply_to_thread, merge_queue, merge_states, merge_status_poll, failing_checks, conversation, body, diff, approve, merge, close, open_in_browser, review_context, readiness_available, readiness, group_files])
         .run(tauri::generate_context!())
         .expect("error while running PR Review");
 }
@@ -1232,13 +1480,13 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_graphql_error, extract_devin_org_id, fold_check_nodes, graphql_errors_only, parse_devin_credentials, parse_required_check_rules, summarize_checks, DevinCredentials, GithubError, LatestCheck};
+    use super::{classify_graphql_error, etag_store, extract_devin_org_id, fold_check_nodes, graphql_errors_only, parse_devin_credentials, parse_last_page, parse_required_check_rules, partition_for_hydration, summarize_checks, CachedPullDetail, DevinCredentials, GithubError, LatestCheck};
 
     /// Talks to the real GitHub API with gh's token: `cargo test -- --ignored live_github --nocapture`.
     #[tokio::test]
     #[ignore]
     async fn live_github_queue_and_pull_loads() {
-        use super::{body, conversation, diff, failing_checks, merge_states, queue, viewer, CheckTarget, QueueKind};
+        use super::{diff, failing_checks, merge_states, pull_details, queue, viewer, CheckTarget, QueueKind};
         let started = std::time::Instant::now();
         let login = viewer().await.expect("viewer");
         println!("viewer {login} in {} ms", started.elapsed().as_millis());
@@ -1290,10 +1538,58 @@ mod tests {
                 let repo = first["repository"]["nameWithOwner"].as_str().unwrap().to_string();
                 let number = first["number"].as_u64().unwrap();
                 let started = std::time::Instant::now();
-                let (b, d, c) = tokio::join!(body(repo.clone(), number), diff(repo.clone(), number), conversation(repo.clone(), number));
-                println!("  {repo}#{number}: body {} B, diff {} B, conversation ok={} in {} ms (parallel)", b.expect("body").len(), d.expect("diff").len(), c.is_ok(), started.elapsed().as_millis());
+                let (pd, d) = tokio::join!(pull_details(repo.clone(), number), diff(repo.clone(), number));
+                println!("  {repo}#{number}: pull_details {} B, diff {} B in {} ms (parallel)", pd.expect("pull_details").len(), d.expect("diff").len(), started.elapsed().as_millis());
             }
         }
+        // Second refresh of Involved should hit QUEUE_DETAIL_CACHE and run much faster.
+        let started = std::time::Instant::now();
+        let raw = queue(QueueKind::Involved).await.expect("warm queue");
+        let pages: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let nodes = pages[0]["data"]["search"]["nodes"].as_array().unwrap();
+        println!("warm queue Involved: {} PRs in {} ms", nodes.len(), started.elapsed().as_millis());
+        assert!(nodes.iter().all(|node| node["commits"].is_object() && node["additions"].is_number()));
+    }
+
+    #[test]
+    fn parses_link_last_page_and_partitions_cached_pulls() {
+        let link = r#"<https://api.github.com/repositories/1/pulls/2/files?per_page=100&page=2>; rel="next", <https://api.github.com/repositories/1/pulls/2/files?per_page=100&page=7>; rel="last""#;
+        assert_eq!(parse_last_page(link), Some(7));
+        assert_eq!(parse_last_page(r#"<https://api.github.com/x?page=1>; rel="prev""#), None);
+
+        let mut cache = std::collections::HashMap::new();
+        cache.insert(
+            "p1".to_string(),
+            CachedPullDetail {
+                updated_at: "2026-11-20T00:00:00Z".to_string(),
+                head_ref_oid: "aaa".to_string(),
+                base_ref_name: "main".to_string(),
+                has_stack: false,
+                fields: serde_json::Map::new(),
+            },
+        );
+        cache.insert(
+            "p2".to_string(),
+            CachedPullDetail {
+                updated_at: "2026-11-20T00:00:00Z".to_string(),
+                head_ref_oid: "bbb".to_string(),
+                base_ref_name: "main".to_string(),
+                has_stack: true,
+                fields: serde_json::Map::new(),
+            },
+        );
+        let nodes = vec![
+            serde_json::json!({"id": "p1", "updatedAt": "2026-11-20T00:00:00Z", "headRefOid": "aaa", "baseRefName": "main"}),
+            serde_json::json!({"id": "p2", "updatedAt": "2026-11-20T00:00:00Z", "headRefOid": "bbb", "baseRefName": "main"}),
+            serde_json::json!({"id": "p3", "updatedAt": "2026-11-20T00:00:00Z", "headRefOid": "ccc", "baseRefName": "main"}),
+        ];
+        let (full, live) = partition_for_hydration(&cache, &nodes);
+        assert_eq!(live, vec!["p1".to_string()]);
+        assert_eq!(full, vec!["p2".to_string(), "p3".to_string()]);
+
+        let mut etags = std::collections::HashMap::new();
+        etag_store(&mut etags, "k1".to_string(), "\"e1\"".to_string(), "ok".to_string(), None);
+        assert_eq!(etags.get("k1").map(|entry| entry.etag.as_str()), Some("\"e1\""));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { PullRequest } from './github';
+import { invalidatePullDetails, loadPullDetails } from './pull-details';
 
 export interface ThreadComment {
   id: string;
@@ -82,13 +83,18 @@ async function fetchThreads(pull: PullRequest): Promise<ReviewThread[]> {
 
 export function loadThreads(pull: PullRequest, isFresh = false): Promise<ReviewThread[]> {
   const key = pull.id;
-  if (isFresh) cache.delete(key);
+  if (isFresh) {
+    cache.delete(key);
+    invalidatePullDetails(pull);
+    const pending = fetchThreads(pull);
+    pending.catch(() => cache.delete(key));
+    cache.set(key, pending);
+    return pending;
+  }
   const cached = cache.get(key);
   if (cached != null) return cached;
-  const pending = fetchThreads(pull);
-  pending.catch(() => cache.delete(key));
-  cache.set(key, pending);
-  return pending;
+  // Share the single `pull_details` GraphQL call when opening or prefetching a PR.
+  return loadPullDetails(pull).then((details) => details.threads);
 }
 
 export async function setThreadResolved(threadId: string, resolved: boolean): Promise<void> {
@@ -101,4 +107,5 @@ export async function replyToThread(threadId: string, body: string): Promise<voi
 
 export function forgetThreads(pull: PullRequest): void {
   cache.delete(pull.id);
+  invalidatePullDetails(pull);
 }

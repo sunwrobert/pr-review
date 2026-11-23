@@ -17,6 +17,7 @@ export interface PullRequest {
   deletions: number;
   changedFiles: number;
   headRefName: string;
+  headRefOid?: string;
   baseRefName: string;
   mergeable: MergeableState;
   mergeStateStatus: string;
