@@ -1,5 +1,6 @@
 import { chromium, type CDPSession, type Page } from 'playwright-core';
 import { join } from 'node:path';
+import { cpus } from 'node:os';
 
 interface Metrics {
   layouts: number;
@@ -21,6 +22,7 @@ interface ScenarioResult {
   scriptMs: number;
   taskMs: number;
   maxRenderedRows: number;
+  invokes: number;
 }
 
 const DIST = join(import.meta.dir, 'dist');
@@ -30,7 +32,7 @@ const args = new Set(process.argv.slice(2));
 const PULLS = Number(process.env.BENCH_PULLS ?? 400);
 const RUNS = Number(process.env.BENCH_RUNS ?? 5);
 const CPU_THROTTLE = Number(process.env.BENCH_CPU ?? 4);
-const WEIGHTS = { layouts: 0.3, styleRecalcs: 0.25, maxRenderedRows: 0.1, longTasks: 0.1, taskMs: 0.15, p95KeyMs: 0.1 } as const;
+const WEIGHTS = { layouts: 0.25, styleRecalcs: 0.20, maxRenderedRows: 0.10, longTasks: 0.10, taskMs: 0.15, p95KeyMs: 0.10, invokes: 0.10 } as const;
 
 function chromePath(): string | undefined {
   return process.env.BENCH_CHROME;
@@ -85,6 +87,8 @@ function percentile(values: number[], fraction: number): number {
 }
 
 type Scenario = { name: string; run(page: Page): Promise<number[]>; verify(page: Page): Promise<string | null> };
+
+const totalInvokes = (page: Page): Promise<number> => page.evaluate(() => Object.values((window as unknown as { __shimCalls?: Record<string, number> }).__shimCalls ?? {}).reduce((sum, count) => sum + count, 0));
 
 const selectedId = (page: Page): Promise<string | null> => page.evaluate(() => document.querySelector('#pr-list li.selected')?.getAttribute('data-id') ?? null);
 const openDialogs = (page: Page): Promise<string[]> => page.evaluate(() => [...document.querySelectorAll('dialog[open]')].map((dialog) => dialog.id));
@@ -147,6 +151,49 @@ const SCENARIOS: Scenario[] = [
       return keyLatencies(page, Array.from({ length: 20 }, () => 'Meta+j'));
     },
     verify: async (page) => ((await page.evaluate(() => document.getElementById('diff-root')!.scrollTop)) > 0 ? null : 'diff did not scroll'),
+  },
+  {
+    name: 'open-pr',
+    run: async (page) => {
+      const targetId = await page.evaluate(() => {
+        const rows = [...document.querySelectorAll<HTMLElement>('#pr-list li[data-id]')];
+        return rows[Math.min(10, rows.length - 1)]?.dataset.id ?? null;
+      });
+      if (targetId == null) return [];
+      const started = await page.evaluate(() => performance.now());
+      await page.locator(`#pr-list li[data-id="${targetId}"] .t`).click();
+      await page.waitForFunction((id) => document.querySelector('#pr-list li.selected')?.getAttribute('data-id') === id && (document.querySelector('#desc-pane .description .markdown')?.textContent?.trim().length ?? 0) > 0, targetId, { timeout: 10_000 });
+      const painted = await page.evaluate(() => performance.now());
+      Object.assign(globalThis, { __openTargetId: targetId });
+      return [painted - started];
+    },
+    verify: async (page) => {
+      const targetId = (globalThis as unknown as { __openTargetId?: string }).__openTargetId;
+      return (await selectedId(page)) === targetId ? null : 'open-pr did not select and render target PR';
+    },
+  },
+  {
+    name: 'hover-open',
+    run: async (page) => {
+      const targetId = await page.evaluate(() => {
+        const rows = [...document.querySelectorAll<HTMLElement>('#pr-list li[data-id]')];
+        return rows[Math.min(16, rows.length - 1)]?.dataset.id ?? null;
+      });
+      if (targetId == null) return [];
+      const row = page.locator(`#pr-list li[data-id="${targetId}"]`);
+      await row.hover();
+      await page.waitForTimeout(220);
+      const started = await page.evaluate(() => performance.now());
+      await row.locator('.t').click();
+      await page.waitForFunction((id) => document.querySelector('#pr-list li.selected')?.getAttribute('data-id') === id && (document.querySelector('#desc-pane .description .markdown')?.textContent?.trim().length ?? 0) > 0, targetId, { timeout: 10_000 });
+      const painted = await page.evaluate(() => performance.now());
+      Object.assign(globalThis, { __hoverTargetId: targetId });
+      return [painted - started];
+    },
+    verify: async (page) => {
+      const targetId = (globalThis as unknown as { __hoverTargetId?: string }).__hoverTargetId;
+      return (await selectedId(page)) === targetId ? null : 'hover-open did not select target PR';
+    },
   },
   {
     name: 'refresh',
@@ -222,6 +269,7 @@ async function runOnceUnbounded(url: string): Promise<ScenarioResult[]> {
   for (const scenario of SCENARIOS) {
     const before = await metrics(cdp);
     const longBefore = await page.evaluate(() => (window as unknown as { __longTasks: number }).__longTasks);
+    const invokesBefore = await totalInvokes(page);
     let maxRenderedRows = 0;
     const started = Date.now();
     Object.assign(globalThis, { __benchStage: `${url.endsWith(String(baseUrlPort)) ? 'base' : 'candidate'} ${scenario.name}` });
@@ -233,6 +281,7 @@ async function runOnceUnbounded(url: string): Promise<ScenarioResult[]> {
     maxRenderedRows = await page.evaluate(() => document.querySelectorAll('#pr-list li[data-id]').length);
     const after = await metrics(cdp);
     const longAfter = await page.evaluate(() => (window as unknown as { __longTasks: number }).__longTasks);
+    const invokesAfter = await totalInvokes(page);
     results.push({
       name: scenario.name,
       wallMs: Date.now() - started,
@@ -243,6 +292,7 @@ async function runOnceUnbounded(url: string): Promise<ScenarioResult[]> {
       scriptMs: after.scriptMs - before.scriptMs,
       taskMs: after.taskMs - before.taskMs,
       maxRenderedRows,
+      invokes: invokesAfter - invokesBefore,
     });
   }
   await browser.close();
@@ -256,7 +306,7 @@ function median(values: number[]): number {
 function combine(runs: ScenarioResult[][]): ScenarioResult[] {
   return runs[0]!.map((first, index) => {
     const pick = (key: keyof Omit<ScenarioResult, 'name'>): number => median(runs.map((run) => run[index]![key]));
-    return { name: first.name, wallMs: pick('wallMs'), p95KeyMs: pick('p95KeyMs'), longTasks: pick('longTasks'), layouts: pick('layouts'), styleRecalcs: pick('styleRecalcs'), scriptMs: pick('scriptMs'), taskMs: pick('taskMs'), maxRenderedRows: pick('maxRenderedRows') };
+    return { name: first.name, wallMs: pick('wallMs'), p95KeyMs: pick('p95KeyMs'), longTasks: pick('longTasks'), layouts: pick('layouts'), styleRecalcs: pick('styleRecalcs'), scriptMs: pick('scriptMs'), taskMs: pick('taskMs'), maxRenderedRows: pick('maxRenderedRows'), invokes: pick('invokes') };
   });
 }
 
@@ -285,6 +335,8 @@ function table(scenarios: ScenarioResult[]): void {
 async function main(): Promise<void> {
   const ref = process.argv.find((arg, index) => process.argv[index - 1] === '--against') ?? 'HEAD';
   const isSelfTest = args.has('--self-test');
+  const uptime = (await Bun.$`uptime`.quiet().text()).trim();
+  if (!args.has('--json')) console.log(`host: ${cpus().length} cores · ${uptime}`);
   const commit = (await Bun.$`git rev-parse --short ${ref}`.quiet().text()).trim();
   if (!args.has('--no-build')) await Bun.$`./node_modules/.bin/vite build -c bench/vite.config.ts`.quiet();
   if (!isSelfTest) await buildRef(ref);

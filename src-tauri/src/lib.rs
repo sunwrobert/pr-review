@@ -67,7 +67,7 @@ static OPENROUTER_KEY: OnceLock<Option<String>> = OnceLock::new();
 
 #[derive(Deserialize, Clone, Copy, Debug)]
 #[serde(rename_all = "lowercase")]
-enum QueueKind {
+pub enum QueueKind {
     Review,
     Mine,
     Involved,
@@ -101,11 +101,26 @@ const GH_RETRY_DELAYS_MS: [u64; 3] = [400, 1_200, 3_000];
 const GITHUB_API: &str = "https://api.github.com";
 const GITHUB_TIMEOUT_SECS: u64 = 40;
 
+/// Loopback-only API override for the offline `net_bench` harness; ignores non-loopback values so tokens never leak.
+fn github_api_base() -> &'static str {
+    static BASE: OnceLock<String> = OnceLock::new();
+    BASE.get_or_init(|| {
+        std::env::var("PR_REVIEW_GITHUB_API")
+            .ok()
+            .map(|raw| raw.trim().trim_end_matches('/').to_string())
+            .filter(|url| url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:"))
+            .unwrap_or_else(|| GITHUB_API.to_string())
+    })
+}
+
 /// gh's token, read once. Calling GitHub directly over one pooled HTTP/2 connection skips the ~440 ms `gh` process start
-/// on every request; `gh` itself stays for the few porcelain commands (approve, close) and as the token source.
+/// on every request; `gh` itself stays as the token source.
 static GITHUB_TOKEN: tokio::sync::Mutex<Option<String>> = tokio::sync::Mutex::const_new(None);
 
 async fn github_token() -> Result<String, String> {
+    if github_api_base() != GITHUB_API {
+        return Ok(std::env::var("PR_REVIEW_GITHUB_TOKEN").unwrap_or_else(|_| "bench-token".to_string()));
+    }
     let mut cached = GITHUB_TOKEN.lock().await;
     if let Some(token) = cached.as_ref() {
         return Ok(token.clone());
@@ -245,7 +260,7 @@ impl GithubError {
 async fn github_once(method: Method, path: &str, body: Option<&serde_json::Value>, accept: Option<&str>) -> Result<GithubResponse, GithubError> {
     let token = github_token().await.map_err(GithubError::Fatal)?;
     let trimmed_path = path.trim_start_matches('/');
-    let url = format!("{GITHUB_API}/{trimmed_path}");
+    let url = format!("{}/{trimmed_path}", github_api_base());
     let cache_key = (method == Method::Get).then(|| etag_cache_key(trimmed_path, accept));
     let cached_etag = if let Some(key) = cache_key.as_deref() {
         ETAG_CACHE.lock().await.as_ref().and_then(|cache| cache.get(key).map(|entry| entry.etag.clone()))
@@ -631,10 +646,10 @@ async fn merge_status_poll(ids: Vec<String>) -> Result<String, String> {
 }
 
 #[derive(Deserialize, Clone)]
-struct CheckTarget {
-    id: String,
-    repo: String,
-    base: String,
+pub struct CheckTarget {
+    pub id: String,
+    pub repo: String,
+    pub base: String,
 }
 
 type RulesCacheEntry = (std::time::Instant, Option<std::collections::HashSet<String>>);
@@ -1465,6 +1480,31 @@ async fn open_in_browser(url: String) -> Result<(), String> {
     // The default browser, so link routers like Ferry or Velja can pick the browser and profile.
     let status = Command::new("/usr/bin/open").args(["--", &url]).status().await.map_err(|error| error.to_string())?;
     if status.success() { Ok(()) } else { Err(format!("could not open {url}")) }
+}
+
+/// Direct Rust entry points for the offline `net_bench` binary; calls the exact same command functions the app invokes.
+pub mod bench_api {
+    pub use super::{CheckTarget, QueueKind};
+
+    pub async fn queue(kind: QueueKind) -> Result<String, String> {
+        super::queue(kind).await
+    }
+
+    pub async fn pull_details(repo: String, number: u64) -> Result<String, String> {
+        super::pull_details(repo, number).await
+    }
+
+    pub async fn diff(repo: String, number: u64) -> Result<String, String> {
+        super::diff(repo, number).await
+    }
+
+    pub async fn merge_states(ids: Vec<String>) -> Result<String, String> {
+        super::merge_states(ids).await
+    }
+
+    pub async fn failing_checks(pulls: Vec<CheckTarget>) -> Result<String, String> {
+        super::failing_checks(pulls).await
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

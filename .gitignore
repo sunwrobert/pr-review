@@ -10,6 +10,8 @@ src-tauri/gen/
 *.log
 bench/dist
 .bench-check.log
+.bench-net-check.log
 bench/dist-base
 bench/.base-src
+bench/.base-tauri
 .tmp/
