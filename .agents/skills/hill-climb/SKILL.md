@@ -15,7 +15,7 @@ Follow this recipe for every performance improvement on `pr-review`. Do not gues
 | **GitHub fetching / Rust backend / caching** | `src-tauri/src/lib.rs` | `bench/net.ts` (`--release` `net_bench` vs calibrated loopback GitHub mock) | `bun run climb:net` | `bun run bench:net:noise` |
 | **Cross-cutting (both)** | `src/` + `src-tauri/` | Both harnesses | `bun run climb:all` | Both noise checks |
 
-> **Frozen contract rule:** Never edit `bench/`, `src-tauri/src/bin/net_bench.rs`, or `src/**/*.test.ts` in the same step you are scoring. If a harness needs a new scenario or bug fix, land and commit that first as its own commit, re-run the noise self-test, and only then climb against that frozen baseline.
+> **Frozen contract rule:** Never edit `bench/`, `src-tauri/examples/net_bench.rs`, or `src/**/*.test.ts` in the same step you are scoring. If a harness needs a new scenario or bug fix, land and commit that first as its own commit, re-run the noise self-test, and only then climb against that frozen baseline.
 
 ## 2. Vet the baseline (before writing code)
 

@@ -3,7 +3,7 @@
 Two offline, `benchmark-checklist`-compliant hill-climbing loops covering every surface in the app:
 
 1. **Frontend UI & IPC (`bench/run.ts`, `bench/climb.sh`)** — headless Chromium against generated fixtures (`400` PRs, `4×` CPU throttle), measuring layouts, style recalcs, rendered rows, long tasks, task ms, p95 key latency, and backend `invoke` counts across 9 scenarios (`navigate-list`, `filter-chips`, `visual-select`, `type-filter`, `theme-preview`, `scroll-diff`, `open-pr`, `hover-open`, `refresh`).
-2. **Rust / GitHub network (`bench/net.ts`, `bench/climb-net.sh`, `src-tauri/src/bin/net_bench.rs`)** — real `--release` Rust binary (`pr_review_lib::bench_api`) against a deterministic loopback GitHub mock calibrated to real GitHub latency curves (search, full details, live-only details, `merge_states`, `failing_checks`, `pull_details`, raw diffs with ETag `304`, and 8-page `Link: rel="last"` `/files` fallback). Zero GitHub rate-limit burn.
+2. **Rust / GitHub network (`bench/net.ts`, `bench/climb-net.sh`, `src-tauri/examples/net_bench.rs`)** — real `--release` Rust binary (`pr_review_lib::bench_api`) against a deterministic loopback GitHub mock calibrated to real GitHub latency curves (search, full details, live-only details, `merge_states`, `failing_checks`, `pull_details`, raw diffs with ETag `304`, and 8-page `Link: rel="last"` `/files` fallback). Zero GitHub rate-limit burn.
 
 ## Commands
 
@@ -45,7 +45,7 @@ cargo test --manifest-path src-tauri/Cargo.toml -- --ignored live_github --nocap
 
 ## Contract for agents hill-climbing on this
 
-- Do not edit `bench/`, `src-tauri/src/bin/net_bench.rs`, or `src/**/*.test.ts` during a climb. They are the contract; changing them to raise the score is cheating.
+- Do not edit `bench/`, `src-tauri/examples/net_bench.rs`, or `src/**/*.test.ts` during a climb. They are the contract; changing them to raise the score is cheating.
 - Vet noise first (`bench:noise` / `bench:net:noise`) before trusting a small win.
 - Keep a change only if the matching `climb` command exits `0` AND the limiter explains the gain. Commit each kept step so the next step benches against it.
 - See `.agents/skills/hill-climb/SKILL.md` for the full step-by-step hill-climbing recipe.

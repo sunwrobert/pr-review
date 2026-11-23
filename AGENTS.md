@@ -20,7 +20,7 @@ All performance work follows `.agents/skills/hill-climb/SKILL.md` and `bench/AGE
 - **Rust / GitHub network:** `bun run climb:net` (`bun run bench:net`, `bun run bench:net:noise`)
 - **Both surfaces:** `bun run climb:all`
 
-Do not edit `bench/`, `src-tauri/src/bin/net_bench.rs`, or `src/**/*.test.ts` while climbing.
+Do not edit `bench/`, `src-tauri/examples/net_bench.rs`, or `src/**/*.test.ts` while climbing.
 
 ## Releases
 

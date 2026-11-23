@@ -397,23 +397,23 @@ function startMockServer(): { url: string; stats: Map<string, StageServerStats>;
 }
 
 async function buildBinary(dir: string): Promise<string> {
-  const proc = Bun.spawn(['cargo', 'build', '--release', '--bin', 'net_bench'], { cwd: dir, stdout: 'pipe', stderr: 'pipe' });
+  const proc = Bun.spawn(['cargo', 'build', '--release', '--example', 'net_bench'], { cwd: dir, stdout: 'pipe', stderr: 'pipe' });
   const exit = await proc.exited;
   if (exit !== 0) {
     const stderr = await new Response(proc.stderr).text();
     throw new Error(`cargo build failed in ${dir}:\n${stderr.slice(-1500)}`);
   }
-  return join(dir, 'target/release/net_bench');
+  return join(dir, 'target/release/examples/net_bench');
 }
 
 async function buildRefBinary(ref: string): Promise<string> {
-  const hasBin = (await Bun.$`git cat-file -e ${ref}:src-tauri/src/bin/net_bench.rs`.quiet().nothrow()).exitCode === 0;
-  if (!hasBin) {
-    throw new Error(`${ref} does not contain src-tauri/src/bin/net_bench.rs yet — commit the harness first, or run with --self-test`);
+  const hasExample = (await Bun.$`git cat-file -e ${ref}:src-tauri/examples/net_bench.rs`.quiet().nothrow()).exitCode === 0;
+  if (!hasExample) {
+    throw new Error(`${ref} does not contain src-tauri/examples/net_bench.rs yet — commit the harness first, or run with --self-test`);
   }
   // Keep target/ across runs so baseline rebuilds only recompile pr-review (~3s).
   await Bun.$`mkdir -p ${BASE_TAURI}`.quiet();
-  await Bun.$`rm -rf ${join(BASE_TAURI, 'src')} ${join(BASE_TAURI, 'Cargo.toml')} ${join(BASE_TAURI, 'Cargo.lock')} ${join(BASE_TAURI, 'build.rs')} ${join(BASE_TAURI, 'tauri.conf.json')} ${join(BASE_TAURI, 'capabilities')} ${join(BASE_TAURI, 'icons')}`.quiet();
+  await Bun.$`rm -rf ${join(BASE_TAURI, 'src')} ${join(BASE_TAURI, 'examples')} ${join(BASE_TAURI, 'Cargo.toml')} ${join(BASE_TAURI, 'Cargo.lock')} ${join(BASE_TAURI, 'build.rs')} ${join(BASE_TAURI, 'tauri.conf.json')} ${join(BASE_TAURI, 'capabilities')} ${join(BASE_TAURI, 'icons')}`.quiet();
   await Bun.$`git archive ${ref} src-tauri | tar -x --strip-components=1 -C ${BASE_TAURI}`.quiet();
   return buildBinary(BASE_TAURI);
 }
@@ -498,7 +498,7 @@ async function main(): Promise<void> {
   const uptime = (await Bun.$`uptime`.quiet().text()).trim();
   console.log(`host: ${cpus().length} cores · ${uptime}`);
 
-  const candidateBin = args.has('--no-build') && existsSync(join(TAURI_DIR, 'target/release/net_bench')) ? join(TAURI_DIR, 'target/release/net_bench') : await buildBinary(TAURI_DIR);
+  const candidateBin = args.has('--no-build') && existsSync(join(TAURI_DIR, 'target/release/examples/net_bench')) ? join(TAURI_DIR, 'target/release/examples/net_bench') : await buildBinary(TAURI_DIR);
   const baseBin = isSelfTest ? candidateBin : await buildRefBinary(ref);
   const commit = (await Bun.$`git rev-parse --short ${ref}`.quiet().text()).trim();
 
