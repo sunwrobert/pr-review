@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import fc from 'fast-check';
 import { isReady, matchesSmartFilter, sortPulls, type SmartFilter, type SortOrder } from './smart';
-import { ATTENTION_ORDER, attentionReasons, buildAgentPrompt, isConflicted, isFailing, needsAttention, prStatus } from './status';
+import { ATTENTION_ORDER, attentionReasons, buildAgentPrompt, isBlockedByRules, isChecksPending, isConflicted, isFailing, needsAttention, prStatus } from './status';
 import { FIXED_NOW, pullArbitrary, pullListArbitrary } from './testing/arbitraries';
 
 const RUNS = { numRuns: Number(process.env.PROPERTY_RUNS ?? 2_000) };
@@ -25,15 +25,28 @@ describe('status invariants', () => {
     fc.assert(
       fc.property(pullArbitrary, (pull) => {
         const { tone } = prStatus(pull);
-        const isBlocking = isConflicted(pull) || isFailing(pull) || pull.reviewDecision === 'CHANGES_REQUESTED' || (pull.reviewDecision === 'APPROVED' && pull.mergeStateStatus === 'BLOCKED');
+        const isBlocking = isConflicted(pull) || isFailing(pull) || pull.reviewDecision === 'CHANGES_REQUESTED' || isBlockedByRules(pull);
         if (isConflicted(pull)) expect(tone).toBe('blocked');
         else if (pull.queueEntry != null) expect(tone).toBe('queued');
         else expect(tone === 'blocked').toBe(isBlocking);
         if (tone === 'approved') expect(pull.reviewDecision).toBe('APPROVED');
-        if (tone === 'pending') expect(pull.reviewDecision === 'APPROVED').toBe(false);
+        if (tone === 'pending') expect(pull.reviewDecision !== 'APPROVED' || (pull.mergeStateStatus === 'BLOCKED' && isChecksPending(pull))).toBe(true);
       }),
       RUNS,
     );
+  });
+
+  test('approved PR with BLOCKED mergeStateStatus while checks are PENDING is waiting, not blocked or needing attention', () => {
+    const base = fc.sample(pullArbitrary, 1)[0]!;
+    const pendingPr = { ...base, isDraft: false, queueEntry: null, mergeable: 'MERGEABLE' as const, mergeStateStatus: 'BLOCKED', reviewDecision: 'APPROVED' as const, checkState: 'PENDING' as const, failingRequired: [] };
+    expect(prStatus(pendingPr)).toEqual({ tone: 'pending', label: 'Checks running' });
+    expect(attentionReasons(pendingPr)).toEqual([]);
+    expect(needsAttention(pendingPr)).toBe(false);
+
+    const blockedPr = { ...pendingPr, checkState: 'SUCCESS' as const };
+    expect(prStatus(blockedPr)).toEqual({ tone: 'blocked', label: 'Blocked' });
+    expect(attentionReasons(blockedPr)).toEqual(['blocked']);
+    expect(needsAttention(blockedPr)).toBe(true);
   });
 
   test('ready pulls never need attention, and attention reasons are ordered and unique', () => {

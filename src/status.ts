@@ -42,13 +42,23 @@ export function isFailing(pull: PullRequest): boolean {
   return pull.checkState === 'FAILURE' || pull.checkState === 'ERROR';
 }
 
+export function isChecksPending(pull: PullRequest): boolean {
+  return pull.checkState === 'PENDING' || pull.checkState === 'EXPECTED';
+}
+
+/** GitHub sets `mergeStateStatus = BLOCKED` while required checks are still running; only treat it as blocked once checks are not pending. */
+export function isBlockedByRules(pull: PullRequest): boolean {
+  return pull.reviewDecision === 'APPROVED' && pull.mergeStateStatus === 'BLOCKED' && !isChecksPending(pull);
+}
+
 export function prStatus(pull: PullRequest): { tone: StatusTone; label: string } {
   if (isConflicted(pull)) return { tone: 'blocked', label: 'Conflicts' };
   if (pull.queueEntry != null) return { tone: 'queued', label: 'In merge queue' };
   if (pull.reviewDecision === 'CHANGES_REQUESTED') return { tone: 'blocked', label: 'Changes requested' };
   if (isFailing(pull)) return { tone: 'blocked', label: 'Checks failing' };
-  if (pull.reviewDecision === 'APPROVED' && pull.mergeStateStatus === 'BLOCKED') return { tone: 'blocked', label: 'Blocked' };
+  if (isBlockedByRules(pull)) return { tone: 'blocked', label: 'Blocked' };
   if (pull.isDraft) return { tone: 'draft', label: 'Draft' };
+  if (pull.reviewDecision === 'APPROVED' && pull.mergeStateStatus === 'BLOCKED' && isChecksPending(pull)) return { tone: 'pending', label: 'Checks running' };
   if (pull.reviewDecision === 'APPROVED') return { tone: 'approved', label: 'Approved' };
   return { tone: 'pending', label: 'Not approved' };
 }
@@ -59,7 +69,7 @@ export function attentionReasons(pull: PullRequest): AttentionReason[] {
   if (isFailing(pull)) reasons.push('failing checks');
   if (pull.reviewDecision === 'CHANGES_REQUESTED') reasons.push('changes requested');
   else if (pull.reviewDecision !== 'APPROVED') reasons.push('not approved');
-  else if (pull.mergeStateStatus === 'BLOCKED' && reasons.length === 0) reasons.push('blocked');
+  else if (isBlockedByRules(pull) && reasons.length === 0) reasons.push('blocked');
   return reasons;
 }
 

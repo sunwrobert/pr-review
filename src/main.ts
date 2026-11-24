@@ -106,6 +106,7 @@ const dom = {
   bulkConfirm: element<HTMLDialogElement>('bulk-confirm'),
   triage: element<HTMLDialogElement>('triage'),
   triageTitle: element('triage-title'),
+  triageSummary: element('triage-summary'),
   triageSections: element('triage-sections'),
   triageCopy: element<HTMLButtonElement>('triage-copy'),
   triageDevin: element<HTMLButtonElement>('triage-devin'),
@@ -2869,11 +2870,18 @@ function renderTriageSummary(): void {
   dom.triageMessage.placeholder = hasDrafts && hasOthers ? `${BULK_FIX_MESSAGE} · drafts: finish and mark ready for review` : hasDrafts ? 'Finish, get CI green, then mark ready for review' : BULK_FIX_MESSAGE;
   dom.triage.querySelectorAll<HTMLInputElement>('input[data-pull]').forEach((input) => (input.checked = !triageExcluded.has(input.dataset.pull ?? '')));
   dom.triage.querySelectorAll<HTMLInputElement>('input[data-reason]').forEach((input) => {
-    const ids = pullsIn(input.dataset.reason as TriageReason).map((pull) => pull.id);
+    const reason = input.dataset.reason as TriageReason;
+    const ids = pullsIn(reason).map((pull) => pull.id);
     const picked = ids.filter((id) => !triageExcluded.has(id)).length;
     input.checked = picked === ids.length;
     input.indeterminate = picked > 0 && picked < ids.length;
-    input.closest('.triage-section')?.querySelector('.triage-count')?.replaceChildren(picked === ids.length ? `${ids.length}` : `${picked}/${ids.length}`);
+    const label = picked === ids.length ? `${ids.length}` : `${picked}/${ids.length}`;
+    input.closest('.triage-section')?.querySelector('.triage-count')?.replaceChildren(label);
+    const pill = dom.triageSummary.querySelector<HTMLElement>(`[data-summary-reason="${reason}"]`);
+    if (pill != null) {
+      pill.classList.toggle('is-off', picked === 0);
+      pill.querySelector('.triage-count')?.replaceChildren(label);
+    }
   });
 }
 
@@ -2926,12 +2934,18 @@ function openTriage(): void {
   const draftCount = triagePulls.length - attentionCount;
   const draftNote = draftCount > 0 ? ` · ${draftCount} draft${draftCount === 1 ? '' : 's'}` : '';
   dom.triageTitle.textContent = `${attentionCount} PR${attentionCount === 1 ? '' : 's'} need attention${draftNote}${hasSelection ? ' in selection' : ''}`;
-  dom.triageSections.innerHTML = triageSectionReasons().map((reason, index) => {
+  const reasons = triageSectionReasons();
+  dom.triageSummary.innerHTML = reasons.map((reason) => {
+    const meta = TRIAGE_META[reason];
+    const count = pullsIn(reason).length;
+    return `<button type="button" class="triage-pill tone-${meta.tone}" data-summary-reason="${reason}" title="Jump to ${escapeHtml(meta.title)}"><i class="triage-dot"></i><span>${escapeHtml(meta.title)}</span><span class="triage-count">${count}</span></button>`;
+  }).join('');
+  dom.triageSections.innerHTML = reasons.map((reason, index) => {
     const pulls = pullsIn(reason);
     const meta = TRIAGE_META[reason];
     const rows = pulls.map((pull) => `<li><label class="triage-row"><input type="checkbox" data-pull="${escapeHtml(pull.id)}" tabindex="-1" />${statusIcon(pull)}<span class="id">#${pull.number}</span><span class="t">${escapeHtml(pull.title)}</span><span class="age">${relativeTime(pull.updatedAt)}</span></label></li>`).join('');
     const key = index < 9 ? `<kbd class="triage-key">${index + 1}</kbd>` : '';
-    return `<section class="triage-section tone-${meta.tone}"><label class="triage-head"><input type="checkbox" data-reason="${reason}" tabindex="-1" /><i class="triage-dot"></i><span>${meta.title}</span><span class="triage-count">${pulls.length}</span>${key}</label><ol class="bulk-list">${rows}</ol></section>`;
+    return `<section class="triage-section tone-${meta.tone}" data-section-reason="${reason}"><label class="triage-head"><input type="checkbox" data-reason="${reason}" tabindex="-1" /><i class="triage-dot"></i><span>${meta.title}</span><span class="triage-count">${pulls.length}</span>${key}</label><ol class="bulk-list">${rows}</ol></section>`;
   }).join('');
   dom.triageMessage.value = triageMessageDraft;
   renderTriageSummary();
@@ -2941,6 +2955,12 @@ function openTriage(): void {
   moveTriageCursor(0);
 }
 
+dom.triageSummary.addEventListener('click', (event) => {
+  const pill = (event.target as HTMLElement).closest<HTMLElement>('[data-summary-reason]');
+  const reason = pill?.dataset.summaryReason;
+  if (reason == null) return;
+  dom.triageSections.querySelector<HTMLElement>(`[data-section-reason="${reason}"]`)?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+});
 dom.triage.addEventListener('change', (event) => {
   const input = event.target as HTMLInputElement;
   if (input.dataset.pull != null) setTriagePicked([input.dataset.pull], input.checked);
