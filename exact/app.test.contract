@@ -1,0 +1,78 @@
+// ExactReview's flows, driven with `bun exact.mjs agent web --test app.test.contract`.
+// Fixture mode is the default: 400 deterministic pulls, #40010 the huge diff.
+
+test "the queue loads 400 fixture pulls"
+  expect text "counts" == "400 of 400"
+  expect tree has "row-40000"
+  expect tree has "title-40000"
+
+test "the filter narrows the queue"
+  type "filter" "zzzz-nothing-matches"
+  expect text "counts" == "0 of 400"
+  type "filter" ""
+  expect text "counts" == "400 of 400"
+  type "filter" "merge"
+  expect state selIndex == 0
+
+test "opening a pull shows its detail and diff"
+  tap "row-40005"
+  clock data
+  expect tree has "detail-title"
+  expect tree has "desc-body"
+  expect tree has "diff-stat-files"
+  expect tree has "fname-0"
+  expect tree missing "diff-dropped"
+
+test "a file header tap collapses and expands the file"
+  tap "row-40005"
+  clock data
+  expect tree has "diffrow-f0.1"
+  tap "diffrow-f0"
+  expect tree missing "diffrow-f0.1"
+  tap "diffrow-f0"
+  expect tree has "diffrow-f0.1"
+
+test "collapse all collapses every file"
+  tap "row-40005"
+  clock data
+  tap "collapse-all"
+  expect tree missing "diffrow-f0.1"
+  expect tree has "fname-0"
+  tap "expand-all"
+  expect tree has "diffrow-f0.1"
+
+test "j and k move the queue selection, enter opens"
+  type "app" key "j"
+  expect state selIndex == 1
+  type "app" key "j"
+  expect state selIndex == 2
+  type "app" key "k"
+  expect state selIndex == 1
+  type "app" key "Enter"
+  clock data
+  expect tree has "detail-title"
+
+test "the comment dialog posts a fixture comment"
+  tap "row-40005"
+  clock data
+  tap "open-comment"
+  clock settle
+  type "comment-body" "looks good to me"
+  tap "comment-send"
+  clock data
+  expect state commenting == false
+  expect text "toast" == "Comment posted"
+
+test "the huge pull renders with honest big-diff handling"
+  tap "row-40010"
+  clock data
+  expect text "diff-stat-files" == "149 files"
+  expect tree has "fname-0"
+  expect tree missing "diff-dropped"
+
+test "back returns to the queue"
+  tap "row-40005"
+  clock data
+  tap "detail-back"
+  clock data
+  expect text "counts" == "400 of 400"

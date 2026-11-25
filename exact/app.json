@@ -1,0 +1,21 @@
+{
+  "host": {
+    "web": {},
+    "android": {}
+  },
+  "deploy": {
+    "store": {
+      "web": "0"
+    }
+  },
+  "$schema": ".exact/checkout/scripts/app.schema.json",
+  "name": "ExactReview",
+  "short_name": "ExactReview",
+  "id": "dev.experiment.exactreview",
+  "start_url": "/",
+  "display": "standalone",
+  "app": {
+    "id": "dev.experiment.exactreview",
+    "name": "ExactReview"
+  }
+}

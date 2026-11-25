@@ -1,0 +1,483 @@
+// ExactReview: a keyboard-first GitHub PR review client, ported to Exact.
+// Core flows of the Rust/macOS app in the repository root: a queue of pull
+// requests, a diff view with honest big-diff handling (virtualized rows,
+// large and generated files start collapsed, oversized files load per file
+// and truncate with a notice), single-key navigation, and review/comment.
+//
+// Data is app.ts's: deterministic fixtures byte-identical to the Rust app's
+// benchmark harness, or live GitHub when a token is saved in Settings.
+
+routes nav
+  home "/"
+    pr "/pr/:id"
+
+shape Time
+  epochAtZero: number
+
+shape PullRow
+  id: string
+  number: number
+  title: string
+  repo: string
+  author: string
+  additions: number
+  deletions: number
+  changedFiles: number
+  checkState: string
+  review: string
+  draft: bool
+  updatedLabel: string
+
+shape PullList
+  pulls: PullRow[]
+  mode: string
+  note: string
+
+shape PrDetail
+  id: string
+  number: number
+  title: string
+  repo: string
+  url: string
+  author: string
+  branch: string
+  bodyMarkdown: string
+  additions: number
+  deletions: number
+  changedFiles: number
+  review: string
+
+shape DiffRow
+  id: string
+  fileIndex: number
+  kind: string
+  text: string
+  aux: string
+  oldNo: number
+  newNo: number
+
+shape DiffFile
+  id: string
+  index: number
+  name: string
+  stat: string
+  rowCount: number
+  lineCount: number
+  startCollapsed: bool
+  lazy: bool
+  truncated: bool
+  generated: bool
+  rows: DiffRow[]
+
+shape DiffData
+  pullId: string
+  fileCount: number
+  totalLines: number
+  droppedFiles: number
+  files: DiffFile[]
+
+shape LazyFileRows
+  fileIndex: number
+  rows: DiffRow[]
+
+shape LazyAnswer
+  pullId: string
+  files: LazyFileRows[]
+
+shape Reply
+  ok: bool
+  error: string
+  url: string
+
+shape Settings
+  mode: string
+  hasToken: bool
+
+// A file is collapsed when its start state differs from the user's flips;
+// flips from another pull (a stale key) do not count.
+fn isCollapsed(f: DiffFile, toggled: string[], key: string, pullId: string): bool =
+  key == pullId ? f.startCollapsed != toggled.includes(`${f.index}`) : f.startCollapsed
+
+// The rows one file contributes to the flattened diff list. The header row is
+// rows[0] always; a collapsed file contributes it alone. A lazy file shows its
+// notice row until the per-file load answers, then its real rows.
+fn rowsOf(f: DiffFile, lazy: LazyAnswer, collapsed: bool): DiffRow[] = (collapsed ? f.rows.slice(0, 1) :
+    f.lazy ? match first(lazy.files.filter(x => x.fileIndex == f.index)) { case some(x) => f.rows.slice(0, 1).concat(x.rows), case none => f.rows } :
+      f.rows)
+
+component App
+  resource time = exactTime() as shape Time
+  state query = ""
+  state typing = false
+  state selIndex = 0
+  state settingsOpen = false
+  state draftToken = ""
+  state note = ""
+  // Files whose collapse state the user flipped on the open pull. `toggledKey`
+  // is that pull's id; a different pull reads as no flips.
+  state toggledKey = ""
+  state toggled: string[] = []
+  // The file cursor on the detail screen: which file n/p move and x collapses.
+  state fileCursor = 0
+  state commenting = false
+  state draftComment = ""
+  state ggAt = 0
+  resource settings = loadSettings() as shape Settings else empty()
+  resource pulls = loadPulls() as shape PullList else empty()
+  resource detail = loadDetail(selectedId) when selectedId != "" as shape PrDetail else empty()
+  resource diff = loadDiff(selectedId) when selectedId != "" as shape DiffData else empty()
+  resource lazyRows = loadLazyRows(selectedId, lazyKey) when lazyKey != "" as shape LazyAnswer else empty()
+  mutation settingsSaved as shape Reply refreshes settings, pulls then afterSettings
+  mutation commented as shape Reply refreshes detail then afterComment
+  mutation approved as shape Reply refreshes detail then afterApprove
+  derive route = top(nav).name
+  derive selectedId = match stack(nav).filter(e => e.name == "pr").at(-1) { case some(e) => e.params.id, case none => "" }
+  derive shown = pulls.pulls.filter(p => query.trim() == "" or p.title.toLowerCase().includes(query.trim().toLowerCase()) or p.repo.toLowerCase().includes(query.trim().toLowerCase()) or p.number.toString() == query.trim())
+  derive selId = match shown.at(selIndex) { case some(p) => p.id, case none => "" }
+  derive rows = diff.files.map(f => rowsOf(f, lazyRows, isCollapsed(f, toggled, toggledKey, selectedId))).flat()
+  derive lazyKey = diff.pullId == selectedId ? diff.files.filter(f => f.lazy and not isCollapsed(f, toggled, toggledKey, selectedId)).map(f => `${f.index}`).join(",") : ""
+
+  action back
+    nav = back(nav)
+  action follow(url: string)
+    nav = top(nav).name == "pr" and url.startsWith("/pr/") ? replace(nav, url) : go(nav, url)
+  action search(v: string)
+    query = v
+    selIndex = 0
+  action focusFilter
+    focus("filter")
+  action typeStarted
+    typing = true
+  action typeEnded
+    typing = false
+  action clearNote
+    note = ""
+  action noop
+    note = note
+  action reloadQueue
+    refresh pulls
+    if selectedId != ""
+      refresh detail
+      refresh diff
+
+  // Movement in the queue. The selection index is into the filtered list and
+  // clamps at both ends.
+  action moveSel(delta: number)
+    if shown.length > 0
+      let next = max(0, min(shown.length - 1, selIndex + delta))
+      selIndex = next
+      let row = shown.at(next)
+      match row
+        case some(p)
+          scrollIntoView("pr-list", p.id, block="nearest")
+        case none
+          selIndex = 0
+  action jumpSel(last: bool)
+    if shown.length > 0
+      let next = last ? shown.length - 1 : 0
+      selIndex = next
+      let row = shown.at(next)
+      match row
+        case some(p)
+          scrollIntoView("pr-list", p.id, block="nearest")
+        case none
+          selIndex = 0
+  action openSelected
+    let row = shown.at(selIndex)
+    match row
+      case some(p)
+        nav = push(nav, path("pr", p.id))
+      case none
+        note = note
+
+  // j/k on the detail screen walk the unfiltered queue, as the Rust app does.
+  action openDelta(delta: number)
+    let at = pulls.pulls.map(p => p.id).indexOf(selectedId)
+    if at >= 0
+      let row = pulls.pulls.at(at + delta)
+      match row
+        case some(p)
+          nav = replace(nav, path("pr", p.id))
+          toggledKey = ""
+          fileCursor = 0
+        case none
+          note = note
+
+  action toggleFile(index: number)
+    let key = `${index}`
+    if toggledKey != selectedId
+      toggledKey = selectedId
+      toggled = [key]
+    else
+      toggled = toggled.includes(key) ? toggled.filter(x => x != key) : toggled.concat([key])
+  action fileRowTapped(index: number, kind: string)
+    if kind == "file"
+      toggleFile(index)
+  action moveFileCursor(delta: number)
+    if diff.fileCount > 0
+      let next = max(0, min(diff.fileCount - 1, fileCursor + delta))
+      fileCursor = next
+      scrollIntoView("diff-list", `f${next}`, block="nearest")
+  action collapseAll(collapse: bool)
+    toggledKey = selectedId
+    toggled = diff.files.filter(f => f.startCollapsed != collapse).map(f => `${f.index}`)
+
+  // Review.
+  action openComment
+    commenting = true
+    draftComment = ""
+    showModal("comment")
+  action editComment(v: string)
+    draftComment = v
+  action closeComment
+    commenting = false
+    close("comment")
+  action commentKey(k: string, e: KeyboardEvent)
+    if k == "Enter" and not e.shiftKey
+      preventDefault()
+      sendComment()
+  action sendComment
+    if draftComment.trim() != "" and not pending(commented)
+      send commented = postComment(selectedId, draftComment.trim())
+  action afterComment
+    match commented
+      case some(r)
+        if r.ok
+          commenting = false
+          close("comment")
+          note = "Comment posted"
+          draftComment = ""
+        else
+          note = r.error
+      case none
+        note = note
+  action approve
+    if not pending(approved)
+      send approved = postApproval(selectedId)
+  action afterApprove
+    match approved
+      case some(r)
+        note = r.ok ? "Approved" : r.error
+      case none
+        note = note
+
+  // Settings.
+  action openSettings
+    settingsOpen = true
+    draftToken = ""
+    showModal("settings")
+  action closeSettings
+    settingsOpen = false
+    close("settings")
+  action editToken(v: string)
+    draftToken = v
+  action pickMode(mode: string)
+    send settingsSaved = saveSettings(mode, "")
+  action saveToken
+    send settingsSaved = saveSettings(settings.mode, draftToken.trim())
+  action forgetToken
+    send settingsSaved = saveSettings(settings.mode, "forget")
+  action afterSettings
+    match settingsSaved
+      case some(r)
+        note = r.ok ? "Settings saved" : r.error
+      case none
+        note = note
+
+  // The keyboard. Keys bubble here at the root; a field being edited swallows
+  // everything but Escape. Modifier chords are left to the host.
+  action keyPressed(k: string, e: KeyboardEvent)
+    if typing
+      if k == "Escape"
+        typing = false
+        blur()
+    else if e.metaKey or e.ctrlKey or e.altKey
+      ggAt = 0
+    else if route == "pr"
+      if k == "j"
+        openDelta(1)
+      else if k == "k"
+        openDelta(-1)
+      else if k == "n"
+        moveFileCursor(1)
+      else if k == "p"
+        moveFileCursor(-1)
+      else if k == "x"
+        let f = diff.files.at(fileCursor)
+        match f
+          case some(file)
+            toggleFile(file.index)
+          case none
+            note = note
+      else if k == "c"
+        openComment()
+      else if k == "a"
+        approve()
+      else if k == "q" or k == "Escape"
+        nav = back(nav)
+      else if k == "r"
+        reloadQueue()
+    else
+      if k == "g"
+        if performanceNow() - ggAt < 900 and ggAt > 0
+          jumpSel(false)
+          ggAt = 0
+        else
+          ggAt = performanceNow()
+      else if k == "G"
+        jumpSel(true)
+        ggAt = 0
+      else if k == "j"
+        moveSel(1)
+        ggAt = 0
+      else if k == "k"
+        moveSel(-1)
+        ggAt = 0
+      else if k == "Enter"
+        openSelected()
+        ggAt = 0
+      else if k == "/"
+        focusFilter()
+        ggAt = 0
+      else if k == "Escape"
+        query = ""
+        selIndex = 0
+        ggAt = 0
+      else if k == "r"
+        reloadQueue()
+        ggAt = 0
+      else
+        ggAt = 0
+
+  task toastTimer when note != ""
+    after(2600, clearNote)
+
+  view
+    main navigationKey=`${top(nav).id}` navigationBack="back" navigate=follow key=keyPressed testId="app" width="100%" height="100%"
+      for e in stack(nav) key=e.id
+        if e.name == "home"
+          column navigationKey=`${e.id}` navigationScroll="pr-list" position="absolute" inset=0 display="flex" flex-direction="column"
+            header display="flex" flex-wrap="wrap" align-items="center" gap=8 padding="8px 16px"
+              text "Review requested" role="heading" aria-level=1 flex=1 testId="home-title"
+              text `${shown.length} of ${pulls.pulls.length}` role="status" testId="counts"
+              button press=openSettings aria-label="Settings" testId="open-settings"
+                image "symbol:gear"
+              input type="search" value=query input=search focus=typeStarted blur=typeEnded placeholder="Filter  ( / )" aria-label="Filter pull requests" testId="filter" width="100%"
+            if pulls.note != ""
+              text pulls.note font="-exact-footnote" padding="4px 16px" testId="mode-note"
+            if failed(pulls)
+              column flex=1 align-items="center" justify-content="center" gap=12 padding=24
+                text "The queue couldn't be loaded." testId="load-error"
+                button press=reloadQueue buttonStyle="bordered" testId="retry"
+                  text "Try Again"
+            else
+              list id="pr-list" appearance="none" virtualized=true estimated-item-height=56 flex=1 min-height=0 testId="list"
+                for p in shown key=p.id
+                  link href=path("pr", p.id) testId=`row-${p.number}`
+                    row align-items="center" gap=10 padding="7px 14px" width="100%" background-color=(selId == p.id ? "#3a5a8c40" : "#00000000")
+                      column flex=1 min-width=0 gap=1
+                        row align-items="baseline" gap=8
+                          text `#${p.number}` font="-exact-caption1" color="-exact-secondary-label" font-variant-numeric="tabular-nums"
+                          text p.title line-clamp=1 flex=1 font-size=15 testId=`title-${p.number}`
+                        row align-items="center" gap=8
+                          text p.repo font="-exact-caption1" color="-exact-secondary-label"
+                          text p.author font="-exact-caption1" color="-exact-secondary-label"
+                          text `+${p.additions}` font="-exact-caption1" color="#2da44e" font-variant-numeric="tabular-nums"
+                          text `−${p.deletions}` font="-exact-caption1" color="#cf222e" font-variant-numeric="tabular-nums"
+                          text p.updatedLabel font="-exact-caption1" color="-exact-secondary-label"
+                      row align-items="center" gap=6
+                        if p.draft
+                          text "Draft" font="-exact-caption1" color="-exact-secondary-label"
+                        if p.review == "APPROVED"
+                          text "✓" color="#2da44e" font-size=13
+                        else if p.review == "CHANGES_REQUESTED"
+                          text "✗" color="#cf222e" font-size=13
+                        if p.checkState == "SUCCESS"
+                          text "●" color="#2da44e" font-size=10
+                        else if p.checkState == "FAILURE" or p.checkState == "ERROR"
+                          text "●" color="#cf222e" font-size=10
+                        else if p.checkState == "PENDING" or p.checkState == "EXPECTED"
+                          text "●" color="#d4a72c" font-size=10
+        if e.name == "pr"
+          column navigationKey=`${e.id}` navigationScroll="diff-list" position="absolute" inset=0 display="flex" flex-direction="column"
+            header display="flex" align-items="center" gap=8 padding="8px 16px"
+              button id="back" press=back aria-label="Back" testId="detail-back"
+                image "symbol:chevron-left"
+              column flex=1 min-width=0
+                text detail.title role="heading" aria-level=2 line-clamp=1 testId="detail-title"
+                text `${detail.repo} #${detail.number} · ${detail.author}` font="-exact-caption1" color="-exact-secondary-label" line-clamp=1
+              button press=approve testId="approve"
+                text "Approve"
+              button press=openComment testId="open-comment"
+                text "Comment"
+            column flex=1 min-height=0
+              scroll id="desc" max-height="32%" padding="8px 16px"
+                column gap=8
+                  if detail.bodyMarkdown == "" and not failed(detail)
+                    text "Loading…" color="-exact-secondary-label" testId="desc-loading"
+                  if detail.bodyMarkdown != ""
+                    text detail.bodyMarkdown markup="markdown" testId="desc-body"
+              row align-items="center" gap=10 padding="6px 16px"
+                text `${diff.fileCount} files` font="-exact-caption1" color="-exact-secondary-label" font-variant-numeric="tabular-nums" testId="diff-stat-files"
+                text `${diff.totalLines} lines` font="-exact-caption1" color="-exact-secondary-label" font-variant-numeric="tabular-nums" testId="diff-stat-lines"
+                if diff.droppedFiles > 0
+                  text `${diff.droppedFiles} files over the 3000-file cap not shown` font="-exact-caption1" color="#cf222e" testId="diff-dropped"
+                row flex=1
+                button press=collapseAll(true) testId="collapse-all"
+                  text "Collapse all"
+                button press=collapseAll(false) testId="expand-all"
+                  text "Expand all"
+              if diff.fileCount == 0 and not failed(diff)
+                text "Loading diff…" padding=16 color="-exact-secondary-label" testId="diff-loading"
+              list id="diff-list" appearance="none" virtualized=true estimated-item-height=20 flex=1 min-height=0 testId="diff"
+                for r in rows key=r.id
+                  column
+                    if r.kind == "file"
+                      row press=fileRowTapped(r.fileIndex, r.kind) align-items="center" gap=8 padding="5px 12px" background-color="#8a8f9818" testId=`diffrow-${r.id}`
+                        text (match diff.files.at(r.fileIndex) { case some(f) => isCollapsed(f, toggled, toggledKey, selectedId), case none => false } ? "›" : "⌄") width=12 color="-exact-secondary-label"
+                        text r.text font-family="ui-monospace" font-size=12 line-clamp=1 flex=1 testId=`fname-${r.fileIndex}`
+                        text r.aux font="-exact-caption1" color="-exact-secondary-label" font-variant-numeric="tabular-nums"
+                    else
+                      row align-items="stretch" background-color=(r.kind == "add" ? "#2da44e1c" : r.kind == "del" ? "#cf222e1a" : r.kind == "hunk" ? "#0969da14" : "#00000000") testId=`diffrow-${r.id}`
+                        if r.kind == "hunk" or r.kind == "meta" or r.kind == "notice"
+                          text r.text font-family="ui-monospace" font-size=12 line-clamp=1 flex=1 padding="1px 12px" color=(r.kind == "hunk" ? "#0969da" : "-exact-secondary-label")
+                        else
+                          row
+                            text (r.oldNo == 0 ? "" : `${r.oldNo}`) width=34 text-align="right" font-family="ui-monospace" font-size=11 color="-exact-secondary-label" font-variant-numeric="tabular-nums" padding="1px 2px"
+                            text (r.newNo == 0 ? "" : `${r.newNo}`) width=34 text-align="right" font-family="ui-monospace" font-size=11 color="-exact-secondary-label" font-variant-numeric="tabular-nums" padding="1px 2px"
+                            text (r.kind == "add" ? "+" : r.kind == "del" ? "−" : " ") width=10 font-family="ui-monospace" font-size=12 color=(r.kind == "add" ? "#2da44e" : r.kind == "del" ? "#cf222e" : "-exact-secondary-label") padding="1px 0"
+                            text r.text font-family="ui-monospace" font-size=12 line-clamp=1 flex=1 padding="1px 4px 1px 0" white-space="nowrap"
+      dialog id="comment" aria-label="Comment on this pull request"
+        column gap=10 padding=16
+          text "Comment" role="heading" aria-level=2
+          textarea value=draftComment input=editComment focus=typeStarted blur=typeEnded key=commentKey rows=6 placeholder="Leave a comment — Enter posts, Shift+Enter a new line" aria-label="Comment" testId="comment-body" width="70vw"
+          if pending(commented)
+            text "Posting…" font="-exact-footnote" color="-exact-secondary-label" testId="comment-pending"
+          if match commented { case some(r) => not r.ok, case none => false }
+            text (match commented { case some(r) => r.error, case none => "" }) font="-exact-footnote" color="-exact-system-red" testId="comment-error"
+          row gap=10 justify-content="flex-end"
+            button press=closeComment testId="comment-cancel"
+              text "Cancel"
+            button press=sendComment buttonStyle="bordered-prominent" disabled=(draftComment.trim() == "" or pending(commented)) testId="comment-send"
+              text "Comment"
+      dialog id="settings" aria-label="Settings"
+        column gap=12 padding=16
+          text "Settings" role="heading" aria-level=2
+          text `Data: ${settings.mode == "live" ? "live GitHub" : "bundled fixtures"}${settings.hasToken ? "" : " — no token saved"}` font="-exact-footnote" color="-exact-secondary-label" testId="settings-mode"
+          row gap=8
+            button press=pickMode("fixture") buttonStyle=(settings.mode == "live" ? "bordered" : "bordered-prominent") testId="mode-fixture"
+              text "Fixtures"
+            button press=pickMode("live") buttonStyle=(settings.mode == "live" ? "bordered-prominent" : "bordered") testId="mode-live"
+              text "Live GitHub"
+          textarea value=draftToken input=editToken focus=typeStarted blur=typeEnded rows=2 placeholder="GitHub token (stored only on this device)" aria-label="GitHub token" testId="token-field" width="70vw"
+          row gap=10 justify-content="flex-end"
+            button press=closeSettings testId="settings-close"
+              text "Done"
+            if settings.hasToken
+              button press=forgetToken destructive=true testId="token-forget"
+                text "Forget Token"
+            button press=saveToken buttonStyle="bordered" disabled=(draftToken.trim() == "") testId="token-save"
+              text "Save Token"
+      if note != ""
+        row press=clearNote position="absolute" bottom=18 align-self="center" padding="8px 16px" background-color="#24292f" border-radius=8 testId="toast"
+          text note color="#ffffff" font-size=13
