@@ -18,28 +18,30 @@ test "opening a pull shows its detail and diff"
   tap "row-40005"
   clock data
   expect tree has "detail-title"
-  expect tree has "desc-body"
   expect tree has "diff-stat-files"
   expect tree has "fname-0"
+  tap "desc-toggle"
+  clock settle
+  expect tree has "desc-body"
   expect tree missing "diff-dropped"
 
 test "a file header tap collapses and expands the file"
   tap "row-40005"
   clock data
-  expect tree has "diffrow-f0.1"
+  expect tree has "diffrow-f0.c0"
   tap "diffrow-f0"
-  expect tree missing "diffrow-f0.1"
+  expect tree missing "diffrow-f0.c0"
   tap "diffrow-f0"
-  expect tree has "diffrow-f0.1"
+  expect tree has "diffrow-f0.c0"
 
 test "collapse all collapses every file"
   tap "row-40005"
   clock data
   tap "collapse-all"
-  expect tree missing "diffrow-f0.1"
+  expect tree missing "diffrow-f0.c0"
   expect tree has "fname-0"
   tap "expand-all"
-  expect tree has "diffrow-f0.1"
+  expect tree has "diffrow-f0.c0"
 
 test "j and k move the queue selection, enter opens"
   type "app" key "j"

@@ -1,4 +1,4 @@
-// ExactReview: a keyboard-first GitHub PR review client, ported to Exact.
+// ExactReview: a mobile-first GitHub PR review client, ported to Exact.
 // Core flows of the Rust/macOS app in the repository root: a queue of pull
 // requests, a diff view with honest big-diff handling (virtualized rows,
 // large and generated files start collapsed, oversized files load per file
@@ -6,6 +6,14 @@
 //
 // Data is app.ts's: deterministic fixtures byte-identical to the Rust app's
 // benchmark harness, or live GitHub when a token is saved in Settings.
+//
+// Touch does the whole loop — browse the queue, open a pull, read the diff,
+// go back — with 44px hit targets and nothing pinned above the scrolling
+// diff: the body, the stats and the collapse controls are the list's leading
+// content and scroll away with it. The keyboard flows (j/k, gg/G, /, n/p/x,
+// c/a/q/r) are unchanged. Diff content ships as multi-line chunk rows rather
+// than one row per line, so the virtualized list measures a handful of rows
+// per viewport instead of dozens (see BENCH.md).
 
 routes nav
   home "/"
@@ -47,6 +55,18 @@ shape PrDetail
   changedFiles: number
   review: string
 
+// One rendered line inside a chunk row. Hunk/meta lines render full-width;
+// context/add/del render with line-number gutters and a marker column.
+shape DiffLine
+  id: string
+  kind: string
+  text: string
+  oldNo: number
+  newNo: number
+
+// A row of the flattened diff list: a file header, a notice, or a chunk of
+// lines. Chunking keeps the mounted row count small no matter how many lines
+// are in view.
 shape DiffRow
   id: string
   fileIndex: number
@@ -55,6 +75,7 @@ shape DiffRow
   aux: string
   oldNo: number
   newNo: number
+  lines: DiffLine[]
 
 shape DiffFile
   id: string
@@ -105,6 +126,9 @@ fn rowsOf(f: DiffFile, lazy: LazyAnswer, collapsed: bool): DiffRow[] = (collapse
     f.lazy ? match first(lazy.files.filter(x => x.fileIndex == f.index)) { case some(x) => f.rows.slice(0, 1).concat(x.rows), case none => f.rows } :
       f.rows)
 
+fn plural(n: number, one: string, many: string): string =
+  n == 1 ? `1 ${one}` : `${n} ${many}`
+
 component App
   resource time = exactTime() as shape Time
   state query = ""
@@ -120,6 +144,7 @@ component App
   // The file cursor on the detail screen: which file n/p move and x collapses.
   state fileCursor = 0
   state commenting = false
+  state descOpen = false
   state draftComment = ""
   state ggAt = 0
   resource settings = loadSettings() as shape Settings else empty()
@@ -139,6 +164,7 @@ component App
 
   action back
     nav = back(nav)
+    descOpen = false
   action follow(url: string)
     nav = top(nav).name == "pr" and url.startsWith("/pr/") ? replace(nav, url) : go(nav, url)
   action search(v: string)
@@ -213,6 +239,8 @@ component App
   action fileRowTapped(index: number, kind: string)
     if kind == "file"
       toggleFile(index)
+  action toggleDesc
+    descOpen = not descOpen
   action moveFileCursor(delta: number)
     if diff.fileCount > 0
       let next = max(0, min(diff.fileCount - 1, fileCursor + delta))
@@ -358,12 +386,12 @@ component App
       for e in stack(nav) key=e.id
         if e.name == "home"
           column navigationKey=`${e.id}` navigationScroll="pr-list" position="absolute" inset=0 display="flex" flex-direction="column"
-            header display="flex" flex-wrap="wrap" align-items="center" gap=8 padding="8px 16px"
-              text "Review requested" role="heading" aria-level=1 flex=1 testId="home-title"
-              text `${shown.length} of ${pulls.pulls.length}` role="status" testId="counts"
-              button press=openSettings aria-label="Settings" testId="open-settings"
-                image "symbol:gear"
-              input id="filter" type="search" value=query input=search focus=typeStarted blur=typeEnded placeholder="Filter  ( / )" aria-label="Filter pull requests" testId="filter" width="100%"
+            header display="flex" flex-direction="column" gap=8 padding="8px 16px"
+              row align-items="center" gap=8
+                text "Review requested" role="heading" aria-level=1 flex=1 testId="home-title"
+                button press=openSettings aria-label="Settings" testId="open-settings" padding=12
+                  image "symbol:settings"
+              input id="filter" type="search" value=query input=search focus=typeStarted blur=typeEnded placeholder="Filter  ( / )" aria-label="Filter pull requests" testId="filter" width="100%" min-height=44
             if pulls.note != ""
               text pulls.note font="-exact-footnote" padding="4px 16px" testId="mode-note"
             if failed(pulls)
@@ -372,82 +400,93 @@ component App
                 button press=reloadQueue buttonStyle="bordered" testId="retry"
                   text "Try Again"
             else
-              list id="pr-list" appearance="none" virtualized=true estimated-item-height=56 flex=1 min-height=0 testId="list"
+              list id="pr-list" appearance="none" virtualized=true estimated-item-height=57 flex=1 min-height=0 testId="list"
+                row padding="2px 16px 6px" align-items="baseline" gap=8
+                  text `${shown.length} of ${pulls.pulls.length}` role="status" font="-exact-caption1" color="-exact-secondary-label" testId="counts"
+                  if pulls.mode == "fixture"
+                    text "offline fixture" font="-exact-caption1" color="-exact-secondary-label"
                 for p in shown key=p.id
                   link href=path("pr", p.id) aria-selected=(selId == p.id) testId=`row-${p.number}`
-                    row align-items="center" gap=10 padding="7px 14px" width="100%" background-color=(selId == p.id ? "#3a5a8c40" : "#00000000")
+                    row align-items="center" gap=10 padding="10px 16px" background-color=(selId == p.id ? "light-dark(#3a5a8c12, #3a5a8c40)" : "#00000000")
                       column flex=1 min-width=0 gap=1
-                        row align-items="baseline" gap=8
-                          text `#${p.number}` font="-exact-caption1" color="-exact-secondary-label" font-variant-numeric="tabular-nums"
-                          text p.title line-clamp=1 flex=1 font-size=15 testId=`title-${p.number}`
-                        row align-items="center" gap=8
-                          text p.repo font="-exact-caption1" color="-exact-secondary-label"
-                          text p.author font="-exact-caption1" color="-exact-secondary-label"
-                          text `+${p.additions}` font="-exact-caption1" color="#2da44e" font-variant-numeric="tabular-nums"
-                          text `−${p.deletions}` font="-exact-caption1" color="#cf222e" font-variant-numeric="tabular-nums"
-                          text p.updatedLabel font="-exact-caption1" color="-exact-secondary-label"
+                        row align-items="baseline" gap=8 flex-wrap="wrap"
+                          text `#${p.number}` font="-exact-caption1" line-height="1.25rem" color="-exact-secondary-label" font-variant-numeric="tabular-nums"
+                          text p.title line-height="1.25rem" flex=1 min-width=0 testId=`title-${p.number}`
+                        row align-items="center" gap=8 flex-wrap="wrap"
+                          text `${p.repo} · ${p.author}` font="-exact-caption1" line-height="1rem" color="-exact-secondary-label"
+                          text `+${p.additions}` font="-exact-caption1" line-height="1rem" color="light-dark(#166f2f, #3fb950)" font-variant-numeric="tabular-nums"
+                          text `−${p.deletions}` font="-exact-caption1" line-height="1rem" color="light-dark(#b91c1c, #f85149)" font-variant-numeric="tabular-nums"
+                          text p.updatedLabel font="-exact-caption1" line-height="1rem" color="-exact-secondary-label"
                       row align-items="center" gap=6
                         if p.draft
                           text "Draft" font="-exact-caption1" color="-exact-secondary-label"
                         if p.review == "APPROVED"
-                          text "✓" color="#2da44e" font-size=13
+                          text "✓" color="light-dark(#166f2f, #3fb950)" font-size="0.8rem"
                         else if p.review == "CHANGES_REQUESTED"
-                          text "✗" color="#cf222e" font-size=13
+                          text "✗" color="light-dark(#b91c1c, #f85149)" font-size="0.8rem"
                         if p.checkState == "SUCCESS"
-                          text "●" color="#2da44e" font-size=10
+                          text "●" color="light-dark(#166f2f, #3fb950)" font-size="0.625rem"
                         else if p.checkState == "FAILURE" or p.checkState == "ERROR"
-                          text "●" color="#cf222e" font-size=10
+                          text "●" color="light-dark(#b91c1c, #f85149)" font-size="0.625rem"
                         else if p.checkState == "PENDING" or p.checkState == "EXPECTED"
-                          text "●" color="#d4a72c" font-size=10
+                          text "●" color="light-dark(#8a5a00, #d4a72c)" font-size="0.625rem"
         if e.name == "pr"
           column navigationKey=`${e.id}` navigationScroll="diff-list" position="absolute" inset=0 display="flex" flex-direction="column"
-            header display="flex" align-items="center" gap=8 padding="8px 16px"
-              button id="back" press=back aria-label="Back" testId="detail-back"
-                image "symbol:chevron-left"
+            header display="flex" align-items="center" gap=8 padding="6px 8px"
+              button id="back" press=back aria-label="Back" testId="detail-back" padding=12
+                image "symbol:back"
               column flex=1 min-width=0
                 text detail.title role="heading" aria-level=2 line-clamp=1 testId="detail-title"
                 text `${detail.repo} #${detail.number} · ${detail.author}` font="-exact-caption1" color="-exact-secondary-label" line-clamp=1
-              button press=approve testId="approve"
+              button press=approve testId="approve" min-height=44 padding="8px 14px"
                 text "Approve"
-              button press=openComment testId="open-comment"
+              button press=openComment testId="open-comment" min-height=44 padding="8px 14px"
                 text "Comment"
             column flex=1 min-height=0
-              scroll id="desc" max-height="32%" padding="8px 16px"
-                column gap=8
+              list id="diff-list" appearance="none" virtualized=true estimated-item-height=1152 flex=1 min-height=0 testId="diff"
+                column gap=12 padding="10px 16px 16px"
+                  if failed(detail)
+                    text "Couldn't load this pull request." color="light-dark(#b91c1c, #f85149)"
                   if detail.bodyMarkdown == "" and not failed(detail)
                     text "Loading…" color="-exact-secondary-label" testId="desc-loading"
-                  if detail.bodyMarkdown != ""
+                  row press=toggleDesc align-items="center" gap=8 min-height=44 testId="desc-toggle" role="button" aria-expanded=descOpen
+                    text (descOpen ? "⌄" : "›") width="1rem" color="-exact-secondary-label"
+                    text "Description" font-weight=600
+                  if descOpen and detail.bodyMarkdown != ""
                     text detail.bodyMarkdown markup="markdown" testId="desc-body"
-              row align-items="center" gap=10 padding="6px 16px"
-                text `${diff.fileCount} files` font="-exact-caption1" color="-exact-secondary-label" font-variant-numeric="tabular-nums" testId="diff-stat-files"
-                text `${diff.totalLines} lines` font="-exact-caption1" color="-exact-secondary-label" font-variant-numeric="tabular-nums" testId="diff-stat-lines"
-                if diff.droppedFiles > 0
-                  text `${diff.droppedFiles} files over the 3000-file cap not shown` font="-exact-caption1" color="#cf222e" testId="diff-dropped"
-                row flex=1
-                button press=collapseAll(true) testId="collapse-all"
-                  text "Collapse all"
-                button press=collapseAll(false) testId="expand-all"
-                  text "Expand all"
-              if diff.fileCount == 0 and not failed(diff)
-                text "Loading diff…" padding=16 color="-exact-secondary-label" testId="diff-loading"
-              list id="diff-list" appearance="none" virtualized=true estimated-item-height=20 flex=1 min-height=0 testId="diff"
+                  row align-items="center" gap=10 flex-wrap="wrap"
+                    text plural(diff.fileCount, "file", "files") font="-exact-caption1" color="-exact-secondary-label" font-variant-numeric="tabular-nums" testId="diff-stat-files"
+                    text plural(diff.totalLines, "line", "lines") font="-exact-caption1" color="-exact-secondary-label" font-variant-numeric="tabular-nums" testId="diff-stat-lines"
+                    if diff.droppedFiles > 0
+                      text plural(diff.droppedFiles, "file", "files") font="-exact-caption1" color="light-dark(#b91c1c, #f85149)" testId="diff-dropped"
+                    row flex=1
+                    button press=collapseAll(true) testId="collapse-all" min-height=44 padding="8px 14px"
+                      text "Collapse all"
+                    button press=collapseAll(false) testId="expand-all" min-height=44 padding="8px 14px"
+                      text "Expand all"
+                  if diff.fileCount == 0 and not failed(diff)
+                    text "Loading diff…" color="-exact-secondary-label" testId="diff-loading"
                 for r in rows key=r.id
-                  column
+                  column gap=0
                     if r.kind == "file"
-                      row press=fileRowTapped(r.fileIndex, r.kind) align-items="center" gap=8 padding="5px 12px" background-color="#8a8f9818" testId=`diffrow-${r.id}`
-                        text (match diff.files.at(r.fileIndex) { case some(f) => isCollapsed(f, toggled, toggledKey, selectedId), case none => false } ? "›" : "⌄") width=12 color="-exact-secondary-label"
-                        text r.text font-family="ui-monospace" font-size=12 line-clamp=1 flex=1 testId=`fname-${r.fileIndex}`
+                      row press=fileRowTapped(r.fileIndex, r.kind) align-items="center" gap=8 padding="8px 16px" min-height=44 background-color="light-dark(#8a8f9818, #8a8f9824)" testId=`diffrow-${r.id}`
+                        text (match diff.files.at(r.fileIndex) { case some(f) => isCollapsed(f, toggled, toggledKey, selectedId), case none => false } ? "›" : "⌄") width="1rem" color="-exact-secondary-label"
+                        text r.text font-family="ui-monospace" font-size="0.75rem" line-clamp=1 flex=1 min-width=0 testId=`fname-${r.fileIndex}`
                         text r.aux font="-exact-caption1" color="-exact-secondary-label" font-variant-numeric="tabular-nums"
+                    else if r.kind == "notice"
+                      row padding="8px 16px" testId=`diffrow-${r.id}`
+                        text r.text font-family="ui-monospace" font-size="0.75rem" line-clamp=2 color="light-dark(#0550ae, #58a6ff)"
                     else
-                      row align-items="stretch" background-color=(r.kind == "add" ? "#2da44e1c" : r.kind == "del" ? "#cf222e1a" : r.kind == "hunk" ? "#0969da14" : "#00000000") testId=`diffrow-${r.id}`
-                        if r.kind == "hunk" or r.kind == "meta" or r.kind == "notice"
-                          text r.text font-family="ui-monospace" font-size=12 line-clamp=1 flex=1 padding="1px 12px" color=(r.kind == "hunk" ? "#0969da" : "-exact-secondary-label")
-                        else
-                          row
-                            text (r.oldNo == 0 ? "" : `${r.oldNo}`) width=34 text-align="right" font-family="ui-monospace" font-size=11 color="-exact-secondary-label" font-variant-numeric="tabular-nums" padding="1px 2px"
-                            text (r.newNo == 0 ? "" : `${r.newNo}`) width=34 text-align="right" font-family="ui-monospace" font-size=11 color="-exact-secondary-label" font-variant-numeric="tabular-nums" padding="1px 2px"
-                            text (r.kind == "add" ? "+" : r.kind == "del" ? "−" : " ") width=10 font-family="ui-monospace" font-size=12 color=(r.kind == "add" ? "#2da44e" : r.kind == "del" ? "#cf222e" : "-exact-secondary-label") padding="1px 0"
-                            text r.text font-family="ui-monospace" font-size=12 line-clamp=1 flex=1 padding="1px 4px 1px 0" white-space="nowrap"
+                      column gap=0 testId=`diffrow-${r.id}`
+                        for line in r.lines key=line.id
+                          row align-items="center" background-color=(line.kind == "add" ? "light-dark(#2da44e1c, #2da44e26)" : line.kind == "del" ? "light-dark(#cf222e1a, #f851491f)" : line.kind == "hunk" ? "light-dark(#0969da14, #58a6ff1f)" : "#00000000")
+                            if line.kind == "hunk" or line.kind == "meta"
+                              text line.text font-family="ui-monospace" font-size="0.75rem" line-height="1rem" line-clamp=1 flex=1 padding="1px 12px" white-space="nowrap" color=(line.kind == "hunk" ? "light-dark(#0550ae, #58a6ff)" : "-exact-secondary-label")
+                            else
+                              text (line.oldNo == 0 ? "" : `${line.oldNo}`) width="2.2rem" text-align="right" font-family="ui-monospace" font-size="0.75rem" line-height="1rem" color="-exact-secondary-label" font-variant-numeric="tabular-nums" padding="1px 2px"
+                              text (line.newNo == 0 ? "" : `${line.newNo}`) width="2.2rem" text-align="right" font-family="ui-monospace" font-size="0.75rem" line-height="1rem" color="-exact-secondary-label" font-variant-numeric="tabular-nums" padding="1px 2px"
+                              text (line.kind == "add" ? "+" : line.kind == "del" ? "−" : " ") width="0.7rem" font-family="ui-monospace" font-size="0.75rem" line-height="1rem" color=(line.kind == "add" ? "light-dark(#166f2f, #3fb950)" : line.kind == "del" ? "light-dark(#b91c1c, #f85149)" : "-exact-secondary-label") padding="1px 0"
+                              text (line.text == "" ? " " : line.text) font-family="ui-monospace" font-size="0.75rem" line-height="1rem" line-clamp=1 flex=1 padding="1px 4px 1px 0" white-space="nowrap" color=(line.kind == "add" ? "light-dark(#166f2f, #3fb950)" : line.kind == "del" ? "light-dark(#b91c1c, #f85149)" : "-exact-label")
       dialog id="comment" aria-label="Comment on this pull request"
         column gap=10 padding=16
           text "Comment" role="heading" aria-level=2
@@ -457,28 +496,28 @@ component App
           if match commented { case some(r) => not r.ok, case none => false }
             text (match commented { case some(r) => r.error, case none => "" }) font="-exact-footnote" color="-exact-system-red" testId="comment-error"
           row gap=10 justify-content="flex-end"
-            button press=closeComment testId="comment-cancel"
+            button press=closeComment testId="comment-cancel" min-height=44 padding="8px 14px"
               text "Cancel"
-            button press=sendComment buttonStyle="bordered-prominent" disabled=(draftComment.trim() == "" or pending(commented)) testId="comment-send"
+            button press=sendComment buttonStyle="bordered-prominent" disabled=(draftComment.trim() == "" or pending(commented)) testId="comment-send" min-height=44 padding="8px 14px"
               text "Comment"
       dialog id="settings" aria-label="Settings"
         column gap=12 padding=16
           text "Settings" role="heading" aria-level=2
           text `Data: ${settings.mode == "live" ? "live GitHub" : "bundled fixtures"}${settings.hasToken ? "" : " — no token saved"}` font="-exact-footnote" color="-exact-secondary-label" testId="settings-mode"
-          row gap=8
-            button press=pickMode("fixture") buttonStyle=(settings.mode == "live" ? "bordered" : "bordered-prominent") testId="mode-fixture"
+          row gap=8 flex-wrap="wrap"
+            button press=pickMode("fixture") buttonStyle=(settings.mode == "live" ? "bordered" : "bordered-prominent") testId="mode-fixture" min-height=44 padding="8px 14px"
               text "Fixtures"
-            button press=pickMode("live") buttonStyle=(settings.mode == "live" ? "bordered-prominent" : "bordered") testId="mode-live"
+            button press=pickMode("live") buttonStyle=(settings.mode == "live" ? "bordered-prominent" : "bordered") testId="mode-live" min-height=44 padding="8px 14px"
               text "Live GitHub"
           textarea value=draftToken input=editToken focus=typeStarted blur=typeEnded rows=2 placeholder="GitHub token (stored only on this device)" aria-label="GitHub token" testId="token-field" width="70vw"
           row gap=10 justify-content="flex-end"
-            button press=closeSettings testId="settings-close"
+            button press=closeSettings testId="settings-close" min-height=44 padding="8px 14px"
               text "Done"
             if settings.hasToken
-              button press=forgetToken destructive=true testId="token-forget"
+              button press=forgetToken destructive=true testId="token-forget" min-height=44 padding="8px 14px"
                 text "Forget Token"
-            button press=saveToken buttonStyle="bordered" disabled=(draftToken.trim() == "") testId="token-save"
+            button press=saveToken buttonStyle="bordered" disabled=(draftToken.trim() == "") testId="token-save" min-height=44 padding="8px 14px"
               text "Save Token"
       if note != ""
-        row press=clearNote position="absolute" bottom=18 align-self="center" padding="8px 16px" background-color="#24292f" border-radius=8 testId="toast"
-          text note color="#ffffff" font-size=13
+        row press=clearNote position="absolute" bottom=18 align-self="center" padding="8px 16px" background-color="light-dark(#24292f, #f6f8fa)" border-radius=8 testId="toast"
+          text note color="light-dark(#ffffff, #24292f)" font-size="0.8rem"
