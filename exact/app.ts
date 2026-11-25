@@ -6,11 +6,15 @@
 //             Comments and approvals are recorded in memory and echoed back.
 //   live    — the real GitHub REST/GraphQL API with the saved token.
 //
-// The diff pipeline parses unified patches once per pull, classifies files
-// (generated/large start collapsed — the same rules the Rust app uses), and
-// ships rows inline only under explicit caps; anything bigger is served per
-// file through loadLazyRows. Nothing about the caps is hidden: the file row
-// and the diff stats bar both report truncation and drops.
+// The diff pipeline scans unified patches once per pull without materializing
+// lines: one pass counts lines and additions/deletions per file and records
+// each file's byte range; line objects are parsed only for the files that
+// ship inline (small enough, under budget), or when a collapsed/lazy file is
+// expanded — never for rows nobody renders. Content ships as multi-line chunk
+// rows (CHUNK_LINES per row) so the view's virtualized list materializes a
+// handful of rows per viewport instead of one per line. The file row and the
+// diff stats bar report truncation and drops; nothing about the caps is
+// hidden.
 
 import type { Answer, Result, Sources } from './app.contract.d.ts';
 import { fixtureDiff, generateBodyMarkdown, generatePulls, type FixturePull } from './fixturelib.ts';
@@ -19,6 +23,7 @@ export const grants = 'net.fetch https://api.github.com\nfs.read app:/data/setti
 
 type PullRow = Result<'loadPulls'>['pulls'][number];
 type DiffRow = Result<'loadDiff'>['files'][number]['rows'][number];
+type DiffLine = DiffRow['lines'][number];
 type DiffFile = Result<'loadDiff'>['files'][number];
 type Reply = Result<'postComment'>;
 
@@ -84,128 +89,205 @@ function toRow(pull: FixturePull, nowMs: number): PullRow {
 // fixture's own noon.
 const FIXTURE_NOW_MS = Date.parse('2026-09-26T12:00:00Z');
 
-// --- unified diff parsing ---------------------------------------------------
+// --- unified diff scanning --------------------------------------------------
 
 const LARGE_FILE_LINES = 1500;
 const GENERATED_FILE = /(^|\/)(bun\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Cargo\.lock)$|\.snap$|\.min\.(js|css)$/;
 // Honest caps, reported in the UI and in BENCH.md:
 const MAX_FILES = 3000; // GitHub's own files API serves at most 3000
-const INLINE_FILE_ROWS = 1500; // at/under this a file's rows ship with the summary
+const INLINE_FILE_ROWS = 1500; // at/under this many lines a file's rows ship with the summary
 const INLINE_TOTAL_ROWS = 12000; // past this, later small files turn lazy too
 const MAX_FILE_ROWS = 20000; // one file never contributes more; the rest is truncated
+const CHUNK_LINES = 64; // content lines per rendered list row
 
 interface ParsedLine { kind: 'add' | 'del' | 'context' | 'hunk' | 'meta'; text: string; oldNo: number; newNo: number }
-interface ParsedFile {
+
+/** One file's place in the patch and its counts, found without building lines. */
+interface FileScan {
   name: string;
+  start: number; // offset of the `diff --git` line
+  end: number; // offset of the next file's header or the patch's end
   additions: number;
   deletions: number;
-  lines: ParsedLine[];
+  /** What the old eager parser counted: every line in the file's section but
+   * the `diff --git` header and the `--- `/`+++ ` lines. */
+  lineCount: number;
 }
 
-function parsePatch(patch: string): ParsedFile[] {
-  const files: ParsedFile[] = [];
-  let file: ParsedFile | null = null;
-  let oldNo = 0;
-  let newNo = 0;
-  for (const raw of patch.split('\n')) {
-    if (raw.startsWith('diff --git ')) {
-      const names = /^diff --git a\/(.+) b\/(.+)$/.exec(raw);
-      file = { name: names?.[2] ?? raw.slice(11), additions: 0, deletions: 0, lines: [] };
+function lineStartsWith(patch: string, at: number, prefix: string): boolean {
+  for (let i = 0; i < prefix.length; i += 1) if (patch.charCodeAt(at + i) !== prefix.charCodeAt(i)) return false;
+  return true;
+}
+
+const DIFF_GIT = 'diff --git ';
+const RENAME_TO = 'rename to ';
+const RENAME_FROM = 'rename from ';
+const NEW_FILE_MODE = 'new file mode';
+const DELETED_FILE_MODE = 'deleted file mode';
+const SIMILARITY = 'similarity index';
+const INDEX = 'index ';
+const BINARY = 'Binary files';
+const GIT_BINARY = 'GIT binary patch';
+const HUNK = '@@ ';
+const NO_NEWLINE = '\\';
+
+/** Split the patch into per-file scans in one pass, allocating nothing per
+ * line. Mirrors the old line-by-line parser's classification exactly,
+ * including the phantom empty context line `split('\n')` yields for a patch
+ * ending in a newline. */
+function scanPatch(patch: string): FileScan[] {
+  const files: FileScan[] = [];
+  let file: FileScan | null = null;
+  let at = 0;
+  const len = patch.length;
+  while (at <= len) {
+    const nl = patch.indexOf('\n', at);
+    const end = nl === -1 ? len : nl;
+    if (lineStartsWith(patch, at, DIFF_GIT)) {
+      const lineEnd = end;
+      let name = '';
+      const marker = patch.indexOf(' b/', at);
+      if (marker !== -1 && marker < lineEnd) name = patch.slice(marker + 3, lineEnd);
+      else name = patch.slice(at + DIFF_GIT.length, lineEnd);
+      file = { name, start: at, end: len, additions: 0, deletions: 0, lineCount: 0 };
       files.push(file);
-      continue;
+    } else if (file != null) {
+      file.end = len;
+      const c0 = patch.charCodeAt(at);
+      if (lineStartsWith(patch, at, RENAME_TO)) {
+        file.name = patch.slice(at + RENAME_TO.length, end);
+        file.lineCount += 1;
+      } else if (
+        lineStartsWith(patch, at, RENAME_FROM) || lineStartsWith(patch, at, NEW_FILE_MODE) || lineStartsWith(patch, at, DELETED_FILE_MODE) ||
+        lineStartsWith(patch, at, SIMILARITY) || lineStartsWith(patch, at, INDEX) || lineStartsWith(patch, at, BINARY) || lineStartsWith(patch, at, GIT_BINARY) ||
+        lineStartsWith(patch, at, HUNK) || lineStartsWith(patch, at, NO_NEWLINE)
+      ) {
+        file.lineCount += 1;
+      } else if (c0 === 45 && patch.charCodeAt(at + 1) === 45 && patch.charCodeAt(at + 2) === 45 && patch.charCodeAt(at + 3) === 32) {
+        // `--- ` skipped entirely
+      } else if (c0 === 43 && patch.charCodeAt(at + 1) === 43 && patch.charCodeAt(at + 2) === 43 && patch.charCodeAt(at + 3) === 32) {
+        // `+++ ` skipped entirely
+      } else if (c0 === 43) {
+        file.additions += 1;
+        file.lineCount += 1;
+      } else if (c0 === 45) {
+        file.deletions += 1;
+        file.lineCount += 1;
+      } else {
+        file.lineCount += 1; // context (and the trailing phantom empty line)
+      }
     }
-    if (file == null) continue;
-    if (raw.startsWith('rename to ')) {
-      file.name = raw.slice(10);
-      file.lines.push({ kind: 'meta', text: raw, oldNo: 0, newNo: 0 });
-      continue;
-    }
-    if (raw.startsWith('rename from ') || raw.startsWith('new file mode') || raw.startsWith('deleted file mode') || raw.startsWith('similarity index') || raw.startsWith('index ')) {
-      file.lines.push({ kind: 'meta', text: raw, oldNo: 0, newNo: 0 });
-      continue;
-    }
-    if (raw.startsWith('Binary files') || raw.startsWith('GIT binary patch')) {
-      file.lines.push({ kind: 'meta', text: raw, oldNo: 0, newNo: 0 });
-      continue;
-    }
-    if (raw.startsWith('--- ') || raw.startsWith('+++ ')) continue; // redundant with the header
-    if (raw.startsWith('@@ ')) {
-      const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
-      oldNo = hunk ? Number(hunk[1]) : 0;
-      newNo = hunk ? Number(hunk[2]) : 0;
-      file.lines.push({ kind: 'hunk', text: raw, oldNo: 0, newNo: 0 });
-      continue;
-    }
-    if (raw.startsWith('\\')) {
-      file.lines.push({ kind: 'meta', text: raw, oldNo: 0, newNo: 0 });
-      continue;
-    }
-    const marker = raw[0] ?? ' ';
-    if (marker === '+') {
-      file.additions += 1;
-      file.lines.push({ kind: 'add', text: raw.slice(1), oldNo: 0, newNo });
-      newNo += 1;
-    } else if (marker === '-') {
-      file.deletions += 1;
-      file.lines.push({ kind: 'del', text: raw.slice(1), oldNo, newNo: 0 });
-      oldNo += 1;
-    } else {
-      file.lines.push({ kind: 'context', text: raw.slice(1), oldNo, newNo });
-      oldNo += 1;
-      newNo += 1;
-    }
+    if (nl === -1) break;
+    at = nl + 1;
   }
   return files;
 }
 
-interface ShapedDiff {
-  data: Result<'loadDiff'>;
-  /** Rows per file index for lazy serving; absent for inline files. */
-  lazyRows: Map<number, DiffRow[]>;
+/** Parse one file's section of the patch into line objects, at most `limit`
+ * content/meta lines. Only called for lines someone will render. */
+function parseFileLines(patch: string, scan: FileScan, limit: number): ParsedLine[] {
+  const lines: ParsedLine[] = [];
+  let oldNo = 0;
+  let newNo = 0;
+  let at = scan.start;
+  // Skip the `diff --git` header line itself.
+  const headerEnd = patch.indexOf('\n', at);
+  if (headerEnd === -1 || headerEnd >= scan.end) return lines;
+  at = headerEnd + 1;
+  while (at < scan.end && lines.length < limit) {
+    const nl = patch.indexOf('\n', at);
+    const end = nl === -1 || nl > scan.end ? scan.end : nl;
+    const raw = patch.slice(at, end);
+    if (lineStartsWith(patch, at, RENAME_TO)) {
+      lines.push({ kind: 'meta', text: raw, oldNo: 0, newNo: 0 });
+    } else if (
+      lineStartsWith(patch, at, RENAME_FROM) || lineStartsWith(patch, at, NEW_FILE_MODE) || lineStartsWith(patch, at, DELETED_FILE_MODE) ||
+      lineStartsWith(patch, at, SIMILARITY) || lineStartsWith(patch, at, INDEX) || lineStartsWith(patch, at, BINARY) || lineStartsWith(patch, at, GIT_BINARY)
+    ) {
+      lines.push({ kind: 'meta', text: raw, oldNo: 0, newNo: 0 });
+    } else if (lineStartsWith(patch, at, HUNK)) {
+      const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
+      oldNo = hunk ? Number(hunk[1]) : 0;
+      newNo = hunk ? Number(hunk[2]) : 0;
+      lines.push({ kind: 'hunk', text: raw, oldNo: 0, newNo: 0 });
+    } else if (lineStartsWith(patch, at, NO_NEWLINE)) {
+      lines.push({ kind: 'meta', text: raw, oldNo: 0, newNo: 0 });
+    } else if (raw.startsWith('--- ') || raw.startsWith('+++ ')) {
+      // redundant with the header
+    } else {
+      const marker = raw[0] ?? ' ';
+      if (marker === '+') {
+        lines.push({ kind: 'add', text: raw.slice(1), oldNo: 0, newNo });
+        newNo += 1;
+      } else if (marker === '-') {
+        lines.push({ kind: 'del', text: raw.slice(1), oldNo, newNo: 0 });
+        oldNo += 1;
+      } else {
+        lines.push({ kind: 'context', text: raw.slice(1), oldNo, newNo });
+        oldNo += 1;
+        newNo += 1;
+      }
+    }
+    if (nl === -1 || nl > scan.end) break;
+    at = nl + 1;
+  }
+  return lines;
 }
 
-function shapeDiff(pullId: string, patch: string): ShapedDiff {
-  const parsed = parsePatch(patch);
-  const droppedFiles = Math.max(0, parsed.length - MAX_FILES);
-  const kept = parsed.slice(0, MAX_FILES);
+/** Group parsed lines into the rows the list renders: CHUNK_LINES per row. */
+function chunkRows(fileIndex: number, lines: ParsedLine[]): DiffRow[] {
+  const rows: DiffRow[] = [];
+  for (let start = 0; start < lines.length; start += CHUNK_LINES) {
+    const slice = lines.slice(start, start + CHUNK_LINES);
+    rows.push({
+      id: `f${fileIndex}.c${start / CHUNK_LINES}`,
+      fileIndex,
+      kind: 'lines',
+      text: '',
+      aux: '',
+      oldNo: 0,
+      newNo: 0,
+      lines: slice.map((line, i) => ({
+        id: `f${fileIndex}.${start + i + 1}`,
+        kind: line.kind,
+        text: line.text,
+        oldNo: line.oldNo,
+        newNo: line.newNo,
+      })),
+    });
+  }
+  return rows;
+}
+
+interface ShapedDiff {
+  data: Result<'loadDiff'>;
+  /** Per-file scans, for lazy parsing on expand. */
+  scans: FileScan[];
+  /** The raw patch, kept only in live mode; fixture diffs regenerate on demand. */
+  patch: string | null;
+  /** Whether the fixture or live pull is being served; decides lazy re-parse. */
+  pullId: string;
+}
+
+function shapeDiff(pullId: string, patch: string, keepPatch: boolean): ShapedDiff {
+  const scans = scanPatch(patch);
+  const droppedFiles = Math.max(0, scans.length - MAX_FILES);
+  const kept = scans.slice(0, MAX_FILES);
   const files: DiffFile[] = [];
-  const lazyRows = new Map<number, DiffRow[]>();
   let inlineTotal = 0;
   let totalLines = 0;
-  for (const [index, pf] of kept.entries()) {
-    totalLines += pf.lines.length;
-    const generated = GENERATED_FILE.test(pf.name);
-    const lineCount = pf.lines.length;
-    // Row budget: header row plus content rows, capped per file.
+  for (const [index, scan] of kept.entries()) {
+    totalLines += scan.lineCount;
+    const generated = GENERATED_FILE.test(scan.name);
+    const lineCount = scan.lineCount;
     const truncated = lineCount > MAX_FILE_ROWS;
-    const visible = truncated ? pf.lines.slice(0, MAX_FILE_ROWS) : pf.lines;
+    const visibleCount = truncated ? MAX_FILE_ROWS : lineCount;
     const large = lineCount > LARGE_FILE_LINES;
-    const overInline = inlineTotal + visible.length + 1 > INLINE_TOTAL_ROWS;
-    const lazy = truncated || large || overInline || visible.length + 1 > INLINE_FILE_ROWS;
-    inlineTotal += lazy ? 1 : visible.length + 1;
+    const overInline = inlineTotal + visibleCount + 1 > INLINE_TOTAL_ROWS;
+    const lazy = truncated || large || overInline || visibleCount + 1 > INLINE_FILE_ROWS;
+    inlineTotal += lazy ? 1 : visibleCount + 1;
 
-    const contentRows: DiffRow[] = visible.map((line, rowIndex) => ({
-      id: `f${index}.${rowIndex + 1}`,
-      fileIndex: index,
-      kind: line.kind,
-      text: line.text,
-      aux: '',
-      oldNo: line.oldNo,
-      newNo: line.newNo,
-    }));
-    if (truncated) {
-      contentRows.push({
-        id: `f${index}.truncated`,
-        fileIndex: index,
-        kind: 'notice',
-        text: `… truncated at ${MAX_FILE_ROWS.toLocaleString('en-US')} of ${lineCount.toLocaleString('en-US')} rows — the rest is on GitHub`,
-        aux: '',
-        oldNo: 0,
-        newNo: 0,
-      });
-    }
-
-    const stat = `+${pf.additions} −${pf.deletions} · ${lineCount.toLocaleString('en-US')} lines`;
+    const stat = `+${scan.additions} −${scan.deletions} · ${lineCount.toLocaleString('en-US')} lines`;
     const auxBits: string[] = [stat];
     if (generated) auxBits.push('generated');
     if (lazy) auxBits.push('loads on expand');
@@ -214,10 +296,11 @@ function shapeDiff(pullId: string, patch: string): ShapedDiff {
       id: `f${index}`,
       fileIndex: index,
       kind: 'file',
-      text: pf.name,
+      text: scan.name,
       aux: auxBits.join(' · '),
       oldNo: 0,
       newNo: 0,
+      lines: [],
     };
 
     if (lazy) {
@@ -229,13 +312,15 @@ function shapeDiff(pullId: string, patch: string): ShapedDiff {
         aux: '',
         oldNo: 0,
         newNo: 0,
+        lines: [],
       };
+      const rowCount = 1 + Math.ceil(visibleCount / CHUNK_LINES) + (truncated ? 1 : 0);
       files.push({
         id: `f${index}`,
         index,
-        name: pf.name,
+        name: scan.name,
         stat,
-        rowCount: contentRows.length + 1,
+        rowCount,
         lineCount,
         startCollapsed: true,
         lazy: true,
@@ -243,12 +328,25 @@ function shapeDiff(pullId: string, patch: string): ShapedDiff {
         generated,
         rows: [header, notice],
       });
-      lazyRows.set(index, contentRows);
     } else {
+      const lines = parseFileLines(patch, scan, visibleCount);
+      const contentRows = chunkRows(index, lines);
+      if (truncated) {
+        contentRows.push({
+          id: `f${index}.truncated`,
+          fileIndex: index,
+          kind: 'notice',
+          text: `… truncated at ${MAX_FILE_ROWS.toLocaleString('en-US')} of ${lineCount.toLocaleString('en-US')} rows — the rest is on GitHub`,
+          aux: '',
+          oldNo: 0,
+          newNo: 0,
+          lines: [],
+        });
+      }
       files.push({
         id: `f${index}`,
         index,
-        name: pf.name,
+        name: scan.name,
         stat,
         rowCount: contentRows.length + 1,
         lineCount,
@@ -268,8 +366,34 @@ function shapeDiff(pullId: string, patch: string): ShapedDiff {
       droppedFiles,
       files,
     },
-    lazyRows,
+    scans,
+    patch: keepPatch ? patch : null,
+    pullId,
   };
+}
+
+/** Parse one lazy file's rows on demand. The patch comes from the cache entry
+ * (live) or a deterministic regeneration (fixture). */
+function lazyFileRows(shaped: ShapedDiff, index: number, regeneratedPatch: string | null): DiffRow[] {
+  const scan = shaped.scans[index];
+  if (scan == null) return [];
+  const patch = shaped.patch ?? regeneratedPatch;
+  if (patch == null) return [];
+  const visibleCount = Math.min(scan.lineCount, MAX_FILE_ROWS);
+  const rows = chunkRows(index, parseFileLines(patch, scan, visibleCount));
+  if (scan.lineCount > MAX_FILE_ROWS) {
+    rows.push({
+      id: `f${index}.truncated`,
+      fileIndex: index,
+      kind: 'notice',
+      text: `… truncated at ${MAX_FILE_ROWS.toLocaleString('en-US')} of ${scan.lineCount.toLocaleString('en-US')} rows — the rest is on GitHub`,
+      aux: '',
+      oldNo: 0,
+      newNo: 0,
+      lines: [],
+    });
+  }
+  return rows;
 }
 
 // --- fixture diff cache -------------------------------------------------------
@@ -281,10 +405,16 @@ function fixtureShapedDiff(pullId: string): ShapedDiff {
   if (cached != null) return cached;
   const pull = pullsFixture().find((candidate) => candidate.id === pullId);
   const patch = pull == null ? '' : fixtureDiff(pull);
-  const shaped = shapeDiff(pullId, patch);
+  // Fixture patches regenerate deterministically; don't hold megabytes per pull.
+  const shaped = shapeDiff(pullId, patch, false);
   if (diffCache.size >= 24) diffCache.delete(diffCache.keys().next().value!);
   diffCache.set(pullId, shaped);
   return shaped;
+}
+
+function regenerateFixturePatch(pullId: string): string | null {
+  const pull = pullsFixture().find((candidate) => candidate.id === pullId);
+  return pull == null ? null : fixtureDiff(pull);
 }
 
 // --- live GitHub ------------------------------------------------------------
@@ -437,7 +567,7 @@ const sources: Sources = {
       const found = await livePulls(settings.token).then((ps) => ps.find((p) => p.id === id));
       if (found == null) throw new Error('pull not found in the live queue');
       const text = await liveDiffText(settings.token, found.repository.nameWithOwner, found.number);
-      const shaped = shapeDiff(id, text);
+      const shaped = shapeDiff(id, text, true);
       diffCache.set(id, shaped);
       return shaped.data;
     }
@@ -446,13 +576,15 @@ const sources: Sources = {
 
   loadLazyRows: async ([id, keys], _store, storage) => {
     const settings = await readSettings(storage);
-    const shaped = settings.mode === 'live' && settings.token !== '' ? diffCache.get(id) ?? fixtureShapedDiff(id) : fixtureShapedDiff(id);
+    const live = settings.mode === 'live' && settings.token !== '';
+    const shaped = live ? diffCache.get(id) ?? fixtureShapedDiff(id) : fixtureShapedDiff(id);
+    const regenerated = shaped.patch == null && !live ? regenerateFixturePatch(id) : null;
     const wanted = String(keys).split(',').filter((part) => part !== '').map(Number);
     return {
       pullId: id,
       files: wanted.flatMap((index) => {
-        const rows = shaped.lazyRows.get(index);
-        return rows == null ? [] : [{ fileIndex: index, rows }];
+        if (shaped.scans[index] == null) return [];
+        return [{ fileIndex: index, rows: lazyFileRows(shaped, index, regenerated) }];
       }),
     };
   },
