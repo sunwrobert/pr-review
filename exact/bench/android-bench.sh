@@ -22,7 +22,10 @@ set -u
 PKG=dev.experiment.exactreview
 APK=${1:?apk path}
 OUT=${2:-/tmp/android-bench.txt}
-ADB="$HOME/Android/Sdk/platform-tools/adb"
+# adb comes from the Android SDK: $ADB wins, then the usual SDK env vars, then PATH.
+ADB="${ADB:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}/platform-tools/adb}"
+command -v "$ADB" >/dev/null 2>&1 || ADB=adb
+export ADB
 
 exec 3>"$OUT"
 say() { echo "$@" | tee /dev/fd/3; }
@@ -56,7 +59,7 @@ tap_text() {
   $ADB shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1
   $ADB pull /sdcard/ui.xml /tmp/ui.xml >/dev/null 2>&1
   python3 - "$needle" <<'PYEOF'
-import re, sys, subprocess
+import os, re, sys, subprocess
 xml = open('/tmp/ui.xml', encoding='utf-8', errors='replace').read()
 needle = sys.argv[1]
 best = None
@@ -67,7 +70,7 @@ for m in re.finditer(r'text="([^"]*)"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]
         best = (x, y)
         break
 if best:
-    subprocess.run(['/home/ubuntu/Android/Sdk/platform-tools/adb', 'shell', 'input', 'tap', str(best[0]), str(best[1])])
+    subprocess.run([os.environ['ADB'], 'shell', 'input', 'tap', str(best[0]), str(best[1])])
     print('tapped', best, file=sys.stderr)
 else:
     print('NOT FOUND: ' + needle, file=sys.stderr)
