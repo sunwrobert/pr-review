@@ -120,11 +120,57 @@ BENCH_RUNS=5 bun exact/bench/crossbench.ts   # from the repo root
 `BENCH_CHROME` selects the Chromium binary (default: playwright's). Raw output
 of the run above is committed as `bench/results-web.json`.
 
+## Exact Android runtime numbers
+
+Measured on the debug APK (`app-release.apk`, the one attached to the bench
+report) installed on a headless emulator: Android 36 x86_64 system image,
+4 GB RAM, KVM-accelerated CPU, **software rendering** (swiftshader). The
+driver is `bench/android-bench.sh`'s python equivalent: adb input/swipe/tap,
+`uiautomator dump` for work verification, `dumpsys gfxinfo` for jank,
+`am start -W` for cold start, `dumpsys meminfo` for memory. These numbers
+are not comparable to the web table column-by-column: an x86_64 emulator with
+software rendering is not a phone, and input injection is not a finger. They
+are a documented run of the same scenarios on the same fixtures, as far as
+the platform honestly allows.
+
+| metric | android | exact web (same run as above) |
+|---|---|---|
+| cold start (median of 5) | 3313 ms (`am start -W` TotalTime) | 146 ms first rows |
+| memory after cold start | 167 MB PSS | 5.1 MB heap |
+| memory after huge PR | 244 MB PSS | 14.8 MB heap |
+| navigate-list scroll | 3.5% janky frames, p95 36 ms/frame | p95 paint 81 ms/key |
+| open-huge-pr | 536 ms tap-to-quiescent, stats rendered ("149 files" visible) | 628 ms paint |
+
+Work checks: the queue rendered at boot (`#40000` visible to uiautomator);
+the huge PR's detail opened with its honest stats line. Memory is whole-app
+PSS (ART, Compose, GPU runtime included), which is why it cannot be set
+against the web heap column directly.
+
+Honest gaps in the Android run:
+
+- **open-pr for an ordinary PR could not be measured**: the tap target
+  `#40005`'s text node was absent from the uiautomator dump in two of three
+  attempts (rows near the top render, but the dump intermittently missed
+  individual row texts; `#40010` matched once, `#40005` never). No number is
+  reported rather than an unverified one.
+- **scroll-diff jank is not reported**: the open-pr tap failure meant no
+  ordinary diff was open during the swipe burst, so the frames measured were
+  not a diff scroll. The list-scroll number above *is* valid (the queue was
+  verified visible).
+- **type-filter and the keyboard scenarios are not applicable on Android**:
+  the platform delivers keys only to a focused field and the emulator image
+  has no hardware keyboard flow; filtering is a keyboard-first interaction
+  in this app.
+- tap-to-quiescent is a coarse wall metric (input injection to frames stable
+  across two 200 ms polls); it does not capture async parse work that
+  produces no frames, and swiftshader inflates every frame cost.
+- Cold start on a real arm64 device with hardware rendering would be
+  strictly faster than 3313 ms; treat that figure as an upper bound under
+  hostile conditions, not a device number.
+
 ## Not measured
 
 - The Rust app's native macOS shell cold start and memory (no macOS host in
   this environment; the shell is what most users would call "the app's"
   startup).
-- Android runtime performance of the Exact app (the APK builds; benchmark
-  numbers above are web-only, as labeled).
 - Real GitHub network behavior; both harnesses are offline by design.
