@@ -337,6 +337,7 @@ component App
         openSelected()
         ggAt = 0
       else if k == "/"
+        preventDefault()
         focusFilter()
         ggAt = 0
       else if k == "Escape"
@@ -362,7 +363,7 @@ component App
               text `${shown.length} of ${pulls.pulls.length}` role="status" testId="counts"
               button press=openSettings aria-label="Settings" testId="open-settings"
                 image "symbol:gear"
-              input type="search" value=query input=search focus=typeStarted blur=typeEnded placeholder="Filter  ( / )" aria-label="Filter pull requests" testId="filter" width="100%"
+              input id="filter" type="search" value=query input=search focus=typeStarted blur=typeEnded placeholder="Filter  ( / )" aria-label="Filter pull requests" testId="filter" width="100%"
             if pulls.note != ""
               text pulls.note font="-exact-footnote" padding="4px 16px" testId="mode-note"
             if failed(pulls)
@@ -373,7 +374,7 @@ component App
             else
               list id="pr-list" appearance="none" virtualized=true estimated-item-height=56 flex=1 min-height=0 testId="list"
                 for p in shown key=p.id
-                  link href=path("pr", p.id) testId=`row-${p.number}`
+                  link href=path("pr", p.id) aria-selected=(selId == p.id) testId=`row-${p.number}`
                     row align-items="center" gap=10 padding="7px 14px" width="100%" background-color=(selId == p.id ? "#3a5a8c40" : "#00000000")
                       column flex=1 min-width=0 gap=1
                         row align-items="baseline" gap=8
