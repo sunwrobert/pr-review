@@ -63,6 +63,7 @@ hydrateIcons();
 const dom = {
   list: element<HTMLOListElement>('pr-list'),
   filter: element<HTMLInputElement>('filter'),
+  filterCount: element('filter-count'),
   viewTitle: element('view-title'),
   empty: element('empty'),
   pr: element('pr'),
@@ -273,10 +274,26 @@ function matchesText(pull: PullRequest, needle: string): boolean {
   return semanticQuery === needle && isSemanticMatch(semanticScores.get(pull.id));
 }
 
+function renderFilterCount(count: number, needle: string): void {
+  const hasQuery = needle !== '';
+  const box = dom.filter.closest('.search');
+  box?.classList.toggle('has-query', hasQuery);
+  if (dom.filterCount.hidden !== !hasQuery) dom.filterCount.hidden = !hasQuery;
+  if (!hasQuery) return;
+  const text = String(count);
+  if (dom.filterCount.textContent !== text) dom.filterCount.textContent = text;
+  dom.filterCount.classList.toggle('is-empty', count === 0);
+  const title = count === 0 ? 'No matching PRs' : `${count} matching PR${count === 1 ? '' : 's'}`;
+  if (dom.filterCount.dataset.tip !== title) dom.filterCount.dataset.tip = title;
+}
+
 function renderSearchState(): void {
   const box = dom.filter.closest('.search');
   box?.classList.toggle('searching', isSemanticLoading);
-  renderListEmpty(filteredPulls().length, state.filter.trim().toLowerCase());
+  const needle = state.filter.trim().toLowerCase();
+  const count = filteredPulls().length;
+  renderFilterCount(count, needle);
+  renderListEmpty(count, needle);
 }
 
 function scheduleSemanticSearch(): void {
@@ -715,6 +732,7 @@ function renderList(): void {
   }
   dom.list.classList.toggle('grouped', isGrouped && groups.length > 0);
   virtualList.setRows(rows);
+  renderFilterCount(pulls.length, needle);
   renderListEmpty(pulls.length, needle);
   virtualList.highlightKey(pulls.some((pull) => pull.id === state.selectedId) ? state.selectedId : null);
   document.getElementById('toggle-grouping')?.classList.toggle('active', isGrouped);
